@@ -32,7 +32,7 @@ spec:
         - name: proxy-sidecar
           image: credential-proxy:latest
           imagePullPolicy: Never
-          restartPolicy: Always   # sidecar (K8s 1.29+)
+          restartPolicy: Always   # This is what makes it a sidecar (K8s 1.29+)
           env:
             - name: ANTHROPIC_API_KEY
               valueFrom:

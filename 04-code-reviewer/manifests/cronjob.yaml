@@ -71,7 +71,6 @@ spec:
                   cpu: "100m"
 
           containers:
-            # Main container: Claude Code with fake credentials
             - name: claude-code
               image: claude-code:latest
               imagePullPolicy: Never
