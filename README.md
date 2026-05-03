@@ -60,7 +60,9 @@ envsubst '$TESTING_REPO' < manifests/configmap.yaml | kubectl apply -f -
 | 03 | [Sidecar Proxy](./03-sidecar-proxy/) | Secure credentials with a proxy sidecar pattern |
 | 04 | [Code Reviewer](./04-code-reviewer/) | Autonomous PR reviewer running on a CronJob |
 | 05 | [Developer Agent](./05-developer-agent/) | Autonomous developer with persistent memory and session resume |
-| 06 | [Future](./06-future/) | E2B sandbox isolation and KRO abstractions (coming soon) |
+| 06 | [KRO Agent](./06-kro-agent/) | One CRD to rule them all — KRO abstracts the full agent pattern |
+
+See [ROADMAP.md](./ROADMAP.md) for planned future extensions.
 
 ## Quick Start
 

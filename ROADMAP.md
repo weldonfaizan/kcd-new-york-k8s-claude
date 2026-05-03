@@ -1,0 +1,84 @@
+# Roadmap
+
+Planned extensions to the platform engineering patterns demonstrated in this repo.
+
+---
+
+## Agent Sandbox Isolation
+
+Run Claude Code agents inside isolated sandboxes so that generated bash commands cannot affect the host pod, other containers, or the cluster. Two complementary approaches:
+
+### Kubernetes Agent Sandbox
+
+[`kubernetes-sigs/agent-sandbox`](https://github.com/kubernetes-sigs/agent-sandbox) provides a `Sandbox` CRD purpose-built for AI agent runtimes on Kubernetes. Each agent runs in its own isolated pod with:
+
+- **Strong isolation** — supports gVisor, Kata Containers, or other runtimes for kernel-level separation
+- **Persistent storage** — workspace and Claude memory survive restarts, just like our PVC pattern in concept 05
+- **Stable identity** — each sandbox gets a stable hostname and network identity
+- **Lifecycle management** — pause, resume, scheduled deletion, and deep hibernation
+- **Warm pools** — pre-warmed sandboxes via `SandboxWarmPool` for instant allocation (no cold-start delay)
+
+```yaml
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: Sandbox
+metadata:
+  name: claude-developer
+spec:
+  podTemplate:
+    spec:
+      containers:
+      - name: claude-code
+        image: claude-code:latest
+        command: ["/bin/bash", "/scripts/entrypoint.sh"]
+```
+
+### E2B Remote Sandbox
+
+[E2B](https://e2b.dev/) provides cloud-hosted ephemeral sandboxes. Using Claude Code's **PreToolUse hooks**, bash commands are intercepted before execution and forwarded to an E2B sandbox:
+
+```
+Claude Code wants to run: npm test
+       |
+       v
+PreToolUse Hook fires
+       |
+       v
+Hook modifies command: e2b-run "npm test"
+       |
+       v
+Local bash runs the wrapper
+       |
+       v
+Wrapper creates E2B sandbox, runs command, returns output
+       |
+       v
+Claude sees results as if they ran locally
+```
+
+File operations (Read/Write/Edit) remain local. Only bash execution is sandboxed.
+
+### KRO as the Sandbox Abstraction Layer
+
+The `ClaudeCodeAgent` RGD from concept 06 can be extended with a `sandbox` field that lets the platform team choose the isolation strategy per agent:
+
+```yaml
+apiVersion: kro.run/v1alpha1
+kind: ClaudeCodeAgent
+metadata:
+  name: claude-developer
+spec:
+  repo: myuser/kcd-nyc-hello
+  prompt: |
+    ...
+  sandbox: kubernetes   # or: e2b, none
+```
+
+The RGD would use CEL conditionals to generate the right resources:
+
+| `sandbox` value | What KRO generates |
+|---|---|
+| `none` | Job + ConfigMap + PVCs (current behavior) |
+| `kubernetes` | `Sandbox` CR from agent-sandbox with gVisor runtime class |
+| `e2b` | Job with PreToolUse hook config pointing to E2B |
+
+This gives developers a single API while the platform team controls the isolation boundary.
