@@ -1,6 +1,6 @@
-# 06 - Future Concepts
+# Future Concepts
 
-These concepts are planned extensions to the platform engineering patterns demonstrated in this repo.
+Planned extensions to the platform engineering patterns demonstrated in this repo.
 
 ---
 
@@ -36,36 +36,3 @@ Claude sees results as if they ran locally
 ```
 
 File operations (Read/Write/Edit) remain local. Only bash execution is sandboxed.
-
----
-
-## KRO Abstraction (Coming Soon)
-
-[KRO (Kube Resource Orchestrator)](https://kro.run/) allows defining custom resource abstractions. This concept will introduce a `ClaudeCodeAgent` custom resource that encapsulates the two-container pattern (main + proxy sidecar) behind a simple, opinionated API.
-
-### Why
-
-Platform teams can expose a controlled, secure-by-default interface for developers to run Claude Code agents without needing to understand the sidecar proxy, PVC, or credential injection implementation.
-
-### What It Would Look Like
-
-```yaml
-apiVersion: kro.run/v1alpha1
-kind: ClaudeCodeAgent
-metadata:
-  name: my-feature-developer
-  namespace: claude-demo
-spec:
-  type: developer        # or "reviewer"
-  model: claude-haiku-4-5-20251001
-  repo: csantanapr/kcd-nyc-hello
-  prompt: "Add a /metrics endpoint with Prometheus format"
-  schedule: ""           # Empty = one-shot Job, cron expression = CronJob
-  persistence:
-    workspace: true
-    memory: true
-  credentials:
-    secretRef: agent-credentials
-```
-
-This single resource would expand into the full Job + Sidecar + PVC + ConfigMap setup automatically.

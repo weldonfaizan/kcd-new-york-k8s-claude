@@ -1,0 +1,350 @@
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: claudecodeagent
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: ClaudeCodeAgent
+
+    spec:
+      agentName: string | required=true description="Display name for the agent (used in git commits)"
+      agentEmail: string | default="claude-agent@bot.local" description="Git email for the agent"
+      model: string | default="claude-haiku-4-5-20251001" description="Claude model to use"
+      repo: string | required=true description="GitHub repository (owner/repo)"
+      task: string | default="" description="Optional task description passed as AGENT_TASK env var"
+      prompt: string | required=true description="Full agent prompt (mounted at /prompts/prompt.md)"
+      schedule: string | default="" description="Cron schedule (empty = one-shot Job, cron = CronJob)"
+      sessionResume: boolean | default=false description="Enable session resume across runs"
+      credentials:
+        secretName: string | required=true description="Name of the Secret containing ANTHROPIC_API_KEY and GH_TOKEN"
+
+    status:
+      configMapName: ${agentConfig.metadata.name}
+      workspacePvcName: ${workspacePvc.metadata.name}
+      memoryPvcName: ${memoryPvc.metadata.name}
+
+  resources:
+
+    # --- 1. ConfigMap: agent configuration, entrypoint script, and prompt ---
+    - id: agentConfig
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: ${schema.metadata.name}-config
+          namespace: ${schema.metadata.namespace}
+        data:
+          TARGET_REPO: ${schema.spec.repo}
+          ANTHROPIC_MODEL: ${schema.spec.model}
+          AGENT_GIT_EMAIL: ${schema.spec.agentEmail}
+          AGENT_GIT_NAME: ${schema.spec.agentName}
+          ENABLE_SESSION_RESUME: '${schema.spec.sessionResume ? "true" : ""}'
+          AGENT_TASK: ${schema.spec.task}
+
+          entrypoint.sh: |
+            #!/bin/bash
+            set -euo pipefail
+
+            git config --global user.email "${"${AGENT_GIT_EMAIL:-claude-agent@bot.local}"}"
+            git config --global user.name "${"${AGENT_GIT_NAME:-Claude Agent}"}"
+
+            # Route only git and gh through the credential proxy (not all HTTPS traffic)
+            if [ -f /certs/combined-ca.crt ]; then
+              git config --global http.proxy http://127.0.0.1:8080
+              git config --global http.sslCAInfo /certs/combined-ca.crt
+              mkdir -p "$HOME/bin"
+              cat > "$HOME/bin/gh" << 'GHWRAPPER'
+            #!/bin/bash
+            exec env HTTPS_PROXY=http://127.0.0.1:8080 SSL_CERT_FILE=/certs/combined-ca.crt /usr/bin/gh "$@"
+            GHWRAPPER
+              chmod +x "$HOME/bin/gh"
+              export PATH="$HOME/bin:$PATH"
+            fi
+
+            # Build prompt: inject env vars as context, then append the prompt file
+            PROMPT="TARGET_REPO=${"${TARGET_REPO}"}"
+            [ -n "${"${AGENT_TASK:-}"}" ] && PROMPT="${"${PROMPT}"}
+            AGENT_TASK=${"${AGENT_TASK:-}"}"
+            PROMPT="${"${PROMPT}"}
+
+            $(cat /prompts/prompt.md)"
+
+            echo "Starting ${"${AGENT_GIT_NAME:-Claude Agent}"}..."
+            echo "Target repo: ${"${TARGET_REPO}"}"
+            [ -n "${"${AGENT_TASK:-}"}" ] && echo "Task: ${"${AGENT_TASK}"}"
+            echo "Model: ${"${ANTHROPIC_MODEL}"}"
+            echo "---"
+
+            # Session resume (opt-in via ENABLE_SESSION_RESUME=true)
+            CLAUDE_ARGS="-p --dangerously-skip-permissions --verbose --output-format stream-json --model ${"${ANTHROPIC_MODEL}"}"
+            if [ "${"${ENABLE_SESSION_RESUME:-}"}" = "true" ]; then
+              PREV_RUN_FLAG="/home/claude/.claude/.agent-ran"
+              if [ -f "$PREV_RUN_FLAG" ]; then
+                echo "Previous session found — resuming with --continue"
+                exec claude $CLAUDE_ARGS --continue -- "${"${PROMPT}"}"
+              else
+                echo "First run — starting fresh session"
+                claude $CLAUDE_ARGS -- "${"${PROMPT}"}"
+                touch "$PREV_RUN_FLAG"
+              fi
+            else
+              exec claude $CLAUDE_ARGS -- "${"${PROMPT}"}"
+            fi
+
+          agent-prompt: ${schema.spec.prompt}
+
+    # --- 2. PVC: workspace for cloned repos ---
+    - id: workspacePvc
+      template:
+        apiVersion: v1
+        kind: PersistentVolumeClaim
+        metadata:
+          name: ${schema.metadata.name}-workspace
+          namespace: ${schema.metadata.namespace}
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 5Gi
+
+    # --- 3. PVC: Claude memory for session resume ---
+    - id: memoryPvc
+      template:
+        apiVersion: v1
+        kind: PersistentVolumeClaim
+        metadata:
+          name: ${schema.metadata.name}-memory
+          namespace: ${schema.metadata.namespace}
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 1Gi
+
+    # --- 4. Job: one-shot agent (when schedule is empty) ---
+    - id: agentJob
+      includeWhen:
+        - ${schema.spec.schedule == ""}
+      template:
+        apiVersion: batch/v1
+        kind: Job
+        metadata:
+          name: ${schema.metadata.name}
+          namespace: ${schema.metadata.namespace}
+        spec:
+          backoffLimit: 0
+          activeDeadlineSeconds: 3600
+          template:
+            spec:
+              restartPolicy: Never
+              volumes:
+                - name: scripts
+                  configMap:
+                    name: ${agentConfig.metadata.name}
+                    items:
+                      - key: entrypoint.sh
+                        path: entrypoint.sh
+                        mode: 0755
+                - name: prompt
+                  configMap:
+                    name: ${agentConfig.metadata.name}
+                    items:
+                      - key: agent-prompt
+                        path: prompt.md
+                - name: workspace
+                  persistentVolumeClaim:
+                    claimName: ${workspacePvc.metadata.name}
+                - name: claude-memory
+                  persistentVolumeClaim:
+                    claimName: ${memoryPvc.metadata.name}
+                - name: proxy-certs
+                  emptyDir: {}
+
+              initContainers:
+                - name: proxy-sidecar
+                  image: credential-proxy:latest
+                  imagePullPolicy: Never
+                  restartPolicy: Always
+                  env:
+                    - name: ANTHROPIC_API_KEY
+                      valueFrom:
+                        secretKeyRef:
+                          name: ${schema.spec.credentials.secretName}
+                          key: ANTHROPIC_API_KEY
+                    - name: GH_TOKEN
+                      valueFrom:
+                        secretKeyRef:
+                          name: ${schema.spec.credentials.secretName}
+                          key: GH_TOKEN
+                  volumeMounts:
+                    - name: proxy-certs
+                      mountPath: /certs
+                  ports:
+                    - containerPort: 8080
+                      protocol: TCP
+                  startupProbe:
+                    exec:
+                      command: ["test", "-f", "/certs/proxy-ca.crt"]
+                    initialDelaySeconds: 1
+                    periodSeconds: 1
+                    failureThreshold: 10
+                  resources:
+                    requests:
+                      memory: "64Mi"
+                      cpu: "50m"
+                    limits:
+                      memory: "128Mi"
+                      cpu: "100m"
+
+              containers:
+                - name: claude-code
+                  image: claude-code:latest
+                  imagePullPolicy: Never
+                  command: ["/bin/bash", "/scripts/entrypoint.sh"]
+                  env:
+                    - name: ANTHROPIC_API_KEY
+                      value: "FAKE_KEY_REPLACED_BY_PROXY"
+                    - name: ANTHROPIC_BASE_URL
+                      value: "http://localhost:8080"
+                    - name: GH_TOKEN
+                      value: "FAKE_GH_TOKEN_REPLACED_BY_PROXY"
+                  envFrom:
+                    - configMapRef:
+                        name: ${agentConfig.metadata.name}
+                  volumeMounts:
+                    - name: workspace
+                      mountPath: /workspace
+                    - name: claude-memory
+                      mountPath: /home/claude/.claude
+                    - name: scripts
+                      mountPath: /scripts
+                    - name: prompt
+                      mountPath: /prompts
+                    - name: proxy-certs
+                      mountPath: /certs
+                      readOnly: true
+                  resources:
+                    requests:
+                      memory: "512Mi"
+                      cpu: "200m"
+                    limits:
+                      memory: "1Gi"
+                      cpu: "1000m"
+
+    # --- 5. CronJob: recurring agent (when schedule is set) ---
+    - id: agentCronJob
+      includeWhen:
+        - ${schema.spec.schedule != ""}
+      template:
+        apiVersion: batch/v1
+        kind: CronJob
+        metadata:
+          name: ${schema.metadata.name}
+          namespace: ${schema.metadata.namespace}
+        spec:
+          schedule: ${schema.spec.schedule}
+          concurrencyPolicy: Forbid
+          successfulJobsHistoryLimit: 3
+          failedJobsHistoryLimit: 3
+          jobTemplate:
+            spec:
+              backoffLimit: 0
+              template:
+                spec:
+                  restartPolicy: Never
+                  volumes:
+                    - name: scripts
+                      configMap:
+                        name: ${agentConfig.metadata.name}
+                        items:
+                          - key: entrypoint.sh
+                            path: entrypoint.sh
+                            mode: 0755
+                    - name: prompt
+                      configMap:
+                        name: ${agentConfig.metadata.name}
+                        items:
+                          - key: agent-prompt
+                            path: prompt.md
+                    - name: workspace
+                      persistentVolumeClaim:
+                        claimName: ${workspacePvc.metadata.name}
+                    - name: claude-memory
+                      persistentVolumeClaim:
+                        claimName: ${memoryPvc.metadata.name}
+                    - name: proxy-certs
+                      emptyDir: {}
+
+                  initContainers:
+                    - name: proxy-sidecar
+                      image: credential-proxy:latest
+                      imagePullPolicy: Never
+                      restartPolicy: Always
+                      env:
+                        - name: ANTHROPIC_API_KEY
+                          valueFrom:
+                            secretKeyRef:
+                              name: ${schema.spec.credentials.secretName}
+                              key: ANTHROPIC_API_KEY
+                        - name: GH_TOKEN
+                          valueFrom:
+                            secretKeyRef:
+                              name: ${schema.spec.credentials.secretName}
+                              key: GH_TOKEN
+                      volumeMounts:
+                        - name: proxy-certs
+                          mountPath: /certs
+                      ports:
+                        - containerPort: 8080
+                          protocol: TCP
+                      startupProbe:
+                        exec:
+                          command: ["test", "-f", "/certs/proxy-ca.crt"]
+                        initialDelaySeconds: 1
+                        periodSeconds: 1
+                        failureThreshold: 10
+                      resources:
+                        requests:
+                          memory: "64Mi"
+                          cpu: "50m"
+                        limits:
+                          memory: "128Mi"
+                          cpu: "100m"
+
+                  containers:
+                    - name: claude-code
+                      image: claude-code:latest
+                      imagePullPolicy: Never
+                      command: ["/bin/bash", "/scripts/entrypoint.sh"]
+                      env:
+                        - name: ANTHROPIC_API_KEY
+                          value: "FAKE_KEY_REPLACED_BY_PROXY"
+                        - name: ANTHROPIC_BASE_URL
+                          value: "http://localhost:8080"
+                        - name: GH_TOKEN
+                          value: "FAKE_GH_TOKEN_REPLACED_BY_PROXY"
+                      envFrom:
+                        - configMapRef:
+                            name: ${agentConfig.metadata.name}
+                      volumeMounts:
+                        - name: workspace
+                          mountPath: /workspace
+                        - name: claude-memory
+                          mountPath: /home/claude/.claude
+                        - name: scripts
+                          mountPath: /scripts
+                        - name: prompt
+                          mountPath: /prompts
+                        - name: proxy-certs
+                          mountPath: /certs
+                          readOnly: true
+                      resources:
+                        requests:
+                          memory: "512Mi"
+                          cpu: "200m"
+                        limits:
+                          memory: "1Gi"
+                          cpu: "1000m"
