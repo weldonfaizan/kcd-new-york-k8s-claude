@@ -18,17 +18,17 @@ spec:
             claimName: claude-memory-pvc
         - name: scripts
           configMap:
-            name: developer-config
+            name: agent-config
             items:
               - key: entrypoint.sh
                 path: entrypoint.sh
                 mode: 0755
         - name: prompt
           configMap:
-            name: developer-config
+            name: agent-config
             items:
-              - key: developer-prompt
-                path: developer.md
+              - key: agent-prompt
+                path: prompt.md
         - name: proxy-certs
           emptyDir: {}
 
@@ -84,7 +84,7 @@ spec:
               value: "FAKE_GH_TOKEN_REPLACED_BY_PROXY"
           envFrom:
             - configMapRef:
-                name: developer-config
+                name: agent-config
           volumeMounts:
             - name: workspace
               mountPath: /workspace

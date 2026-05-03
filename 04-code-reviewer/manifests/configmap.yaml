@@ -1,25 +1,28 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: reviewer-config
+  name: agent-config
   namespace: claude-demo
 data:
   TARGET_REPO: "csantanapr/kcd-nyc-hello"
   ANTHROPIC_MODEL: "claude-haiku-4-5-20251001"
+  AGENT_GIT_EMAIL: "claude-reviewer@bot.local"
+  AGENT_GIT_NAME: "Claude Reviewer"
 
-  # Entrypoint script mounted into the container at /scripts/entrypoint.sh
+  # Generic entrypoint shared by all agents (04-reviewer, 05-developer)
+  # Parameterized via env vars: AGENT_GIT_EMAIL, AGENT_GIT_NAME,
+  # TARGET_REPO, FEATURE_REQUEST (optional), ENABLE_SESSION_RESUME (optional)
   entrypoint.sh: |
     #!/bin/bash
     set -euo pipefail
 
-    git config --global user.email "claude-reviewer@bot.local"
-    git config --global user.name "Claude Reviewer"
+    git config --global user.email "${AGENT_GIT_EMAIL:-claude-agent@bot.local}"
+    git config --global user.name "${AGENT_GIT_NAME:-Claude Agent}"
 
     # Route only git and gh through the credential proxy (not all HTTPS traffic)
     if [ -f /certs/combined-ca.crt ]; then
       git config --global http.proxy http://127.0.0.1:8080
       git config --global http.sslCAInfo /certs/combined-ca.crt
-      # gh wrapper: sets HTTPS_PROXY + CA trust only for gh commands
       mkdir -p "$HOME/bin"
       cat > "$HOME/bin/gh" << 'GHWRAPPER'
     #!/bin/bash
@@ -29,21 +32,38 @@ data:
       export PATH="$HOME/bin:$PATH"
     fi
 
-    PROMPT=$(cat /prompts/reviewer.md)
-    PROMPT="TARGET_REPO=${TARGET_REPO}
+    # Build prompt: inject env vars as context, then append the prompt file
+    PROMPT="TARGET_REPO=${TARGET_REPO}"
+    [ -n "${AGENT_TASK:-}" ] && PROMPT="${PROMPT}
+    AGENT_TASK=${AGENT_TASK:-}"
+    PROMPT="${PROMPT}
 
-    ${PROMPT}"
+    $(cat /prompts/prompt.md)"
 
-    echo "Starting Claude Code Reviewer..."
+    echo "Starting ${AGENT_GIT_NAME:-Claude Agent}..."
     echo "Target repo: ${TARGET_REPO}"
+    [ -n "${AGENT_TASK:-}" ] && echo "Task: ${AGENT_TASK}"
     echo "Model: ${ANTHROPIC_MODEL}"
     echo "---"
 
-    exec claude -p --dangerously-skip-permissions --verbose --output-format stream-json \
-      --model "${ANTHROPIC_MODEL}" -- "${PROMPT}"
+    # Session resume (opt-in via ENABLE_SESSION_RESUME=true)
+    CLAUDE_ARGS="-p --dangerously-skip-permissions --verbose --output-format stream-json --model ${ANTHROPIC_MODEL}"
+    if [ "${ENABLE_SESSION_RESUME:-}" = "true" ]; then
+      PREV_RUN_FLAG="/home/claude/.claude/.agent-ran"
+      if [ -f "$PREV_RUN_FLAG" ]; then
+        echo "Previous session found — resuming with --continue"
+        exec claude $CLAUDE_ARGS --continue -- "${PROMPT}"
+      else
+        echo "First run — starting fresh session"
+        claude $CLAUDE_ARGS -- "${PROMPT}"
+        touch "$PREV_RUN_FLAG"
+      fi
+    else
+      exec claude $CLAUDE_ARGS -- "${PROMPT}"
+    fi
 
-  # Prompt mounted into the container at /prompts/reviewer.md
-  reviewer-prompt: |
+  # Prompt mounted into the container at /prompts/prompt.md
+  agent-prompt: |
     You are an autonomous code review agent for the GitHub repository specified in TARGET_REPO.
 
     ## Setup
