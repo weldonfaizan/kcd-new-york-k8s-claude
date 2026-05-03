@@ -58,9 +58,9 @@ kubectl create secret generic agent-credentials \
   -n claude-demo
 ```
 
-### 3. Configure the feature request
+### 3. Apply the ConfigMap
 
-Edit `manifests/configmap.yaml` to set your `FEATURE_REQUEST`, then apply:
+The agent reads its feature roadmap from `SPEC.md` in the target repo. Apply the config:
 
 ```bash
 kubectl apply -f manifests/configmap.yaml
@@ -95,32 +95,44 @@ The agent will resume its session, read the review comments, and address them.
 2. The PR should have the sentinel tag `<!-- claude-developer -->` in the body
 3. On subsequent runs, verify the agent pushes new commits addressing review comments
 
-## Expected Output (first run)
+## Expected Output (first run — picks next feature from SPEC.md)
 
 ```
-Starting Claude Code Developer Agent...
+Starting Claude Developer...
 Target repo: csantanapr/kcd-nyc-hello
-Feature: Add a /health endpoint that returns JSON status
+Model: claude-haiku-4-5-20251001
 ---
 Cloning csantanapr/kcd-nyc-hello...
+Reading SPEC.md roadmap...
+Next unclaimed feature: "Health endpoint"
 Creating branch: claude/feature/health-endpoint
 Implementing feature...
-Writing tests...
+Marking feature as done in SPEC.md...
 Committing and pushing...
-Opening PR #7: "Add /health endpoint returning JSON status"
+Opening PR #12: "Add /api/health endpoint with uptime and version"
 Done. PR created successfully.
 ```
 
-## Expected Output (subsequent run with review comments)
+## Expected Output (subsequent run — resumes open PR)
 
 ```
-Starting Claude Code Developer Agent...
+Starting Claude Developer...
 Resuming session...
-Found existing PR #7 with 2 review comments.
-Addressing comment 1: "Add timestamp to health response"
-Addressing comment 2: "Include version field"
+Found existing PR #12 with 2 review comments.
+Addressing comment 1: "Add tests for the /api/health endpoint"
+Addressing comment 2: "Include Node.js version in response"
 Committing fixes and pushing...
 Done. Addressed 2 review comments.
+```
+
+## Expected Output (all features complete)
+
+```
+Starting Claude Developer...
+Target repo: csantanapr/kcd-nyc-hello
+---
+Reading SPEC.md roadmap...
+All roadmap features are implemented!
 ```
 
 ## Cleanup

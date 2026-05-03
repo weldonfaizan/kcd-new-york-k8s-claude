@@ -30,12 +30,10 @@ const GITHUB_HOSTS = new Set(["github.com", "api.github.com"]);
 const mitmHandler = (req, res, targetHost) => {
   const headers = { ...req.headers };
 
-  // Replace Authorization header with real GitHub token
-  if (REAL_GH_TOKEN && headers["authorization"]) {
-    const auth = headers["authorization"];
-    if (auth.startsWith("token ")) {
-      headers["authorization"] = `token ${REAL_GH_TOKEN}`;
-    } else if (auth.startsWith("Basic ")) {
+  // Inject or replace Authorization header with real GitHub token
+  if (REAL_GH_TOKEN) {
+    const auth = headers["authorization"] || "";
+    if (auth.startsWith("Basic ")) {
       // Decode base64, replace password, re-encode
       const decoded = Buffer.from(auth.slice(6), "base64").toString();
       const colonIdx = decoded.indexOf(":");
@@ -44,6 +42,10 @@ const mitmHandler = (req, res, targetHost) => {
         const encoded = Buffer.from(`${username}:${REAL_GH_TOKEN}`).toString("base64");
         headers["authorization"] = `Basic ${encoded}`;
       }
+    } else {
+      // No auth or token auth — inject as Basic (works for git and gh)
+      const encoded = Buffer.from(`x-access-token:${REAL_GH_TOKEN}`).toString("base64");
+      headers["authorization"] = `Basic ${encoded}`;
     }
   }
 
