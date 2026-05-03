@@ -12,6 +12,14 @@ data:
     #!/bin/bash
     set -euo pipefail
 
+    # Trust proxy CA for HTTPS interception (gh, git)
+    if [ -f /certs/proxy-ca.crt ]; then
+      cat /etc/ssl/certs/ca-certificates.crt /certs/proxy-ca.crt > /tmp/combined-ca.crt
+      export SSL_CERT_FILE=/tmp/combined-ca.crt
+      export GIT_SSL_CAINFO=/tmp/combined-ca.crt
+      export NODE_EXTRA_CA_CERTS=/certs/proxy-ca.crt
+    fi
+
     git config --global user.email "claude-reviewer@bot.local"
     git config --global user.name "Claude Reviewer"
 

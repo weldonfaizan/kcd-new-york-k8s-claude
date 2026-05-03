@@ -8,6 +8,9 @@ spec:
   template:
     spec:
       restartPolicy: Never
+      volumes:
+        - name: proxy-certs
+          emptyDir: {}
 
       # Native sidecar: starts before main containers, stops when they finish
       initContainers:
@@ -21,9 +24,24 @@ spec:
                 secretKeyRef:
                   name: anthropic-credentials
                   key: ANTHROPIC_API_KEY
+            - name: GH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: anthropic-credentials
+                  key: GH_TOKEN
+                  optional: true
+          volumeMounts:
+            - name: proxy-certs
+              mountPath: /certs
           ports:
             - containerPort: 8080
               protocol: TCP
+          startupProbe:
+            exec:
+              command: ["test", "-f", "/certs/proxy-ca.crt"]
+            initialDelaySeconds: 1
+            periodSeconds: 1
+            failureThreshold: 10
           resources:
             requests:
               memory: "64Mi"
@@ -33,7 +51,7 @@ spec:
               cpu: "100m"
 
       containers:
-        # Main container: Claude Code with a FAKE API key
+        # Main container: Claude Code with FAKE credentials only
         - name: claude-code
           image: claude-code:latest
           imagePullPolicy: Never
@@ -43,10 +61,20 @@ spec:
               value: "FAKE_KEY_REPLACED_BY_PROXY"
             - name: ANTHROPIC_BASE_URL
               value: "http://localhost:8080"
+            - name: GH_TOKEN
+              value: "FAKE_GH_TOKEN_REPLACED_BY_PROXY"
+            - name: HTTPS_PROXY
+              value: "http://127.0.0.1:8080"
+            - name: NO_PROXY
+              value: "localhost,127.0.0.1"
             - name: ANTHROPIC_MODEL
               value: "claude-haiku-4-5-20251001"
             - name: CLAUDE_PROMPT
               value: "Print all environment variables you can see"
+          volumeMounts:
+            - name: proxy-certs
+              mountPath: /certs
+              readOnly: true
           resources:
             requests:
               memory: "256Mi"

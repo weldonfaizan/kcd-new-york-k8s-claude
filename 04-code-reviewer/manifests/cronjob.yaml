@@ -30,6 +30,8 @@ spec:
                     path: reviewer.md
             - name: workspace
               emptyDir: {}
+            - name: proxy-certs
+              emptyDir: {}
 
           # Native sidecar: starts before main containers, stops when they finish
           initContainers:
@@ -48,6 +50,18 @@ spec:
                     secretKeyRef:
                       name: agent-credentials
                       key: GH_TOKEN
+              volumeMounts:
+                - name: proxy-certs
+                  mountPath: /certs
+              ports:
+                - containerPort: 8080
+                  protocol: TCP
+              startupProbe:
+                exec:
+                  command: ["test", "-f", "/certs/proxy-ca.crt"]
+                initialDelaySeconds: 1
+                periodSeconds: 1
+                failureThreshold: 10
               resources:
                 requests:
                   memory: "64Mi"
@@ -67,12 +81,12 @@ spec:
                   value: "FAKE_KEY_REPLACED_BY_PROXY"
                 - name: ANTHROPIC_BASE_URL
                   value: "http://localhost:8080"
-                # GH_TOKEN is the official env var read by gh CLI and git credential helpers
                 - name: GH_TOKEN
-                  valueFrom:
-                    secretKeyRef:
-                      name: agent-credentials
-                      key: GH_TOKEN
+                  value: "FAKE_GH_TOKEN_REPLACED_BY_PROXY"
+                - name: HTTPS_PROXY
+                  value: "http://127.0.0.1:8080"
+                - name: NO_PROXY
+                  value: "localhost,127.0.0.1"
               envFrom:
                 - configMapRef:
                     name: reviewer-config
@@ -83,6 +97,9 @@ spec:
                   mountPath: /prompts
                 - name: workspace
                   mountPath: /workspace
+                - name: proxy-certs
+                  mountPath: /certs
+                  readOnly: true
               resources:
                 requests:
                   memory: "512Mi"

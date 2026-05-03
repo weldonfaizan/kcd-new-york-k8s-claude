@@ -6,3 +6,4 @@ kubeconfig
 node_modules/
 __pycache__/
 *.tar
+.claude/settings.local.json
