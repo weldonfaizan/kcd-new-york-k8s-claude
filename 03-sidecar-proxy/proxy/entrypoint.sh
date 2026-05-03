@@ -7,10 +7,12 @@ mkdir -p "$CERT_DIR"
 
 echo "Generating ephemeral CA and server certificates..."
 
-# Generate CA
+# Generate CA with proper CA extensions
 openssl genrsa -out "$CERT_DIR/ca-key.pem" 2048 2>/dev/null
 openssl req -new -x509 -key "$CERT_DIR/ca-key.pem" \
-  -out "$CERT_DIR/ca-cert.pem" -days 1 -subj "/CN=Credential Proxy CA" 2>/dev/null
+  -out "$CERT_DIR/ca-cert.pem" -days 1 -subj "/CN=Credential Proxy CA" \
+  -addext "basicConstraints=critical,CA:TRUE" \
+  -addext "keyUsage=critical,keyCertSign,cRLSign" 2>/dev/null
 
 # Generate server cert for github.com + api.github.com
 openssl genrsa -out "$CERT_DIR/server-key.pem" 2048 2>/dev/null
@@ -23,9 +25,15 @@ openssl x509 -req -in "$CERT_DIR/server.csr" \
   -CAcreateserial -out "$CERT_DIR/server-cert.pem" \
   -days 1 -extfile "$CERT_DIR/ext.cnf" 2>/dev/null
 
-# Share CA cert with main container via emptyDir volume
+# Share certs with main container via emptyDir volume
 if [ -d "$SHARED_DIR" ]; then
   cp "$CERT_DIR/ca-cert.pem" "$SHARED_DIR/proxy-ca.crt"
+  # Create combined CA bundle (system CAs + proxy CA) for Go/git/curl
+  if [ -f /etc/ssl/certs/ca-certificates.crt ]; then
+    cat /etc/ssl/certs/ca-certificates.crt "$CERT_DIR/ca-cert.pem" > "$SHARED_DIR/combined-ca.crt"
+  else
+    cp "$CERT_DIR/ca-cert.pem" "$SHARED_DIR/combined-ca.crt"
+  fi
   echo "Certs ready. CA written to $SHARED_DIR/proxy-ca.crt"
 else
   echo "Shared cert dir $SHARED_DIR not mounted — skipping CA share"

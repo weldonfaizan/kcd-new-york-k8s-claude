@@ -83,10 +83,6 @@ spec:
                   value: "http://localhost:8080"
                 - name: GH_TOKEN
                   value: "FAKE_GH_TOKEN_REPLACED_BY_PROXY"
-                - name: HTTPS_PROXY
-                  value: "http://127.0.0.1:8080"
-                - name: NO_PROXY
-                  value: "localhost,127.0.0.1"
               envFrom:
                 - configMapRef:
                     name: reviewer-config
