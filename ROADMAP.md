@@ -6,31 +6,13 @@ Planned extensions to the platform engineering patterns demonstrated in this rep
 
 ## Agent Sandbox Isolation
 
-Run Claude Code agents inside isolated sandboxes so that generated bash commands cannot affect the host pod, other containers, or the cluster. Two complementary approaches:
+Run Claude Code agents inside isolated sandboxes so that generated bash commands cannot affect the host pod, other containers, or the cluster.
 
-### Kubernetes Agent Sandbox
+### Kubernetes Agent Sandbox (Implemented — Concept 07)
 
-[`kubernetes-sigs/agent-sandbox`](https://github.com/kubernetes-sigs/agent-sandbox) provides a `Sandbox` CRD purpose-built for AI agent runtimes on Kubernetes. Each agent runs in its own isolated pod with:
+[`kubernetes-sigs/agent-sandbox`](https://github.com/kubernetes-sigs/agent-sandbox) provides a `Sandbox` CRD purpose-built for AI agent runtimes on Kubernetes. See [concept 07](./07-sandbox/agent-sandbox/) for the full implementation.
 
-- **Strong isolation** — supports gVisor, Kata Containers, or other runtimes for kernel-level separation
-- **Persistent storage** — workspace and Claude memory survive restarts, just like our PVC pattern in concept 05
-- **Stable identity** — each sandbox gets a stable hostname and network identity
-- **Lifecycle management** — pause, resume, scheduled deletion, and deep hibernation
-- **Warm pools** — pre-warmed sandboxes via `SandboxWarmPool` for instant allocation (no cold-start delay)
-
-```yaml
-apiVersion: agents.x-k8s.io/v1alpha1
-kind: Sandbox
-metadata:
-  name: claude-developer
-spec:
-  podTemplate:
-    spec:
-      containers:
-      - name: claude-code
-        image: claude-code:latest
-        command: ["/bin/bash", "/scripts/entrypoint.sh"]
-```
+The approach uses `--disallowedTools Bash` to remove the built-in Bash tool, replaced by an MCP server (`sandbox_execute`) that forwards commands to the Sandbox pod's HTTP API. A shared workspace PVC gives filesystem coherence between the agent and sandbox.
 
 ### E2B Remote Sandbox
 

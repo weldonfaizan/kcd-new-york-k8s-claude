@@ -26,7 +26,7 @@ cp .env.example .env
 
 ## Target Repo Setup
 
-Concepts 04-06 need a GitHub repo to operate on. Create one from the template:
+Concepts 04-07 need a GitHub repo to operate on. Create one from the template:
 
 1. Go to [`csantanapr/kcd-nyc-hello-template`](https://github.com/csantanapr/kcd-nyc-hello-template) and click **"Use this template"** → **"Create a new repository"**
 2. Name it whatever you like (e.g., `kcd-nyc-hello`) and make it **private** or **public**
@@ -61,6 +61,7 @@ envsubst '$TESTING_REPO' < manifests/configmap.yaml | kubectl apply -f -
 | 04 | [Code Reviewer](./04-code-reviewer/) | Autonomous PR reviewer running on a CronJob |
 | 05 | [Developer Agent](./05-developer-agent/) | Autonomous developer with persistent memory and session resume |
 | 06 | [KRO Agent](./06-kro-agent/) | One CRD to rule them all — KRO abstracts the full agent pattern |
+| 07 | [Agent Sandbox](./07-sandbox/agent-sandbox/) | Isolate command execution in a separate sandbox pod via MCP |
 
 See [ROADMAP.md](./ROADMAP.md) for planned future extensions.
 
