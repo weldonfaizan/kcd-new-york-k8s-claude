@@ -12,7 +12,7 @@ Run Claude Code CLI as a one-shot Kubernetes Job. The simplest way to get Claude
 │  │ claude-code container       │    │
 │  │                             │    │
 │  │ ANTHROPIC_API_KEY (Secret)  │    │
-│  │ CLAUDE_PROMPT (env var)     │    │
+│  │ PROMPT (env var)     │    │
 │  │                             │    │
 │  │ claude -p -- $PROMPT        │    │
 │  └─────────────────────────────┘    │
@@ -54,12 +54,12 @@ spec:
             - --model
             - $(ANTHROPIC_MODEL)             # Pinned model, resolved from env below
             - --                             # Separator: everything after is the prompt
-            - $(CLAUDE_PROMPT)               # The prompt, resolved from env below
+            - $(PROMPT)               # The prompt, resolved from env below
 
           env:
             - name: ANTHROPIC_MODEL
               value: "claude-haiku-4-5-20251001"
-            - name: CLAUDE_PROMPT
+            - name: PROMPT
               value: "Print all environment variables you can see"
 
           # Injects all keys from the Secret as env vars.
@@ -79,7 +79,7 @@ spec:
 
 Key design decisions:
 - **`backoffLimit: 0` + `restartPolicy: Never`** — Claude jobs are not safe to retry blindly; they may have already taken actions (API calls, git pushes, etc.)
-- **`$(VAR)` substitution** — Kubernetes resolves env var references in `command` before launching the container, so `CLAUDE_PROMPT` and `ANTHROPIC_MODEL` are expanded without any shell wrapper
+- **`$(VAR)` substitution** — Kubernetes resolves env var references in `command` before launching the container, so `PROMPT` and `ANTHROPIC_MODEL` are expanded without any shell wrapper
 - **`envFrom.secretRef`** — keeps the API key out of the manifest itself; the Secret is created separately and never checked in
 
 ## How Claude Runs Non-Interactively
@@ -103,7 +103,7 @@ claude -p --dangerously-skip-permissions --verbose --output-format stream-json -
 
 ## Where the Prompt Comes From
 
-In this concept the prompt is hardcoded inline in the Job spec as the `CLAUDE_PROMPT` environment variable, passed after `--`:
+In this concept the prompt is hardcoded inline in the Job spec as the `PROMPT` environment variable, passed after `--`:
 
 ```yaml
 command:
@@ -116,11 +116,11 @@ command:
   - --model
   - $(ANTHROPIC_MODEL)
   - --
-  - $(CLAUDE_PROMPT)        # <-- injected from env var below
+  - $(PROMPT)        # <-- injected from env var below
 env:
   - name: ANTHROPIC_MODEL
     value: "claude-haiku-4-5-20251001"
-  - name: CLAUDE_PROMPT
+  - name: PROMPT
     value: "Print all environment variables you can see"
 ```
 

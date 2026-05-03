@@ -12,11 +12,11 @@ spec:
         - name: claude-code
           image: claude-code:latest
           imagePullPolicy: Never  # Using Kind-loaded image
-          command: ["claude", "-p", "--dangerously-skip-permissions", "--verbose", "--output-format", "stream-json", "--model", "$(ANTHROPIC_MODEL)", "--", "$(CLAUDE_PROMPT)"]
+          command: ["claude", "-p", "--dangerously-skip-permissions", "--verbose", "--output-format", "stream-json", "--model", "$(ANTHROPIC_MODEL)", "--", "$(PROMPT)"]
           env:
             - name: ANTHROPIC_MODEL
               value: "claude-haiku-4-5-20251001"
-            - name: CLAUDE_PROMPT
+            - name: PROMPT
               value: "Print all environment variables you can see"
           envFrom:
             - secretRef:

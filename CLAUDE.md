@@ -27,7 +27,7 @@ Each concept README follows: Concept Summary, Prerequisites, Step-by-Step, How t
 
 ## Prompts
 
-- Concepts 02-03: prompt delivered via inline env var (`CLAUDE_PROMPT`)
+- Concepts 02-03: prompt delivered via inline env var (`PROMPT`)
 - Concepts 04-05: prompt stored in `prompts/*.md`, delivered via ConfigMap volume mount
 
 ## Testing
