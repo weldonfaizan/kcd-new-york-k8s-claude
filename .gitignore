@@ -1,1 +1,8 @@
 .local/
+.env
+.env.*
+!.env.example
+kubeconfig
+node_modules/
+__pycache__/
+*.tar

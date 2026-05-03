@@ -1,0 +1,16 @@
+# Proxy configuration
+upstream:
+  host: api.anthropic.com
+  port: 443
+  scheme: https
+
+listen:
+  host: 127.0.0.1
+  port: 8080
+
+# The sentinel value that the main container has as its API key.
+# The proxy replaces this with the real key from its own environment.
+sentinel_key: "FAKE_KEY_REPLACED_BY_PROXY"
+
+# Header to inject the real credential into
+credential_header: "x-api-key"

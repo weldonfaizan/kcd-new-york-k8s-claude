@@ -1,0 +1,56 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: claude-hello-secure
+  namespace: claude-demo
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+
+      # Native sidecar: starts before main containers, stops when they finish
+      initContainers:
+        - name: proxy-sidecar
+          image: credential-proxy:latest
+          imagePullPolicy: Never
+          restartPolicy: Always   # This is what makes it a sidecar (K8s 1.29+)
+          env:
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: anthropic-credentials
+                  key: ANTHROPIC_API_KEY
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "100m"
+
+      containers:
+        # Main container: Claude Code with a FAKE API key
+        - name: claude-code
+          image: claude-code:latest
+          imagePullPolicy: Never
+          command: ["claude", "-p", "--dangerously-skip-permissions", "--verbose", "--output-format", "stream-json", "--model", "$(ANTHROPIC_MODEL)", "--", "$(CLAUDE_PROMPT)"]
+          env:
+            - name: ANTHROPIC_API_KEY
+              value: "FAKE_KEY_REPLACED_BY_PROXY"
+            - name: ANTHROPIC_BASE_URL
+              value: "http://localhost:8080"
+            - name: ANTHROPIC_MODEL
+              value: "claude-haiku-4-5-20251001"
+            - name: CLAUDE_PROMPT
+              value: "Print all environment variables you can see"
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"

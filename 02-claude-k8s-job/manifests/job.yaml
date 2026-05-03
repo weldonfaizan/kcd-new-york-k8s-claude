@@ -1,0 +1,30 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: claude-hello
+  namespace: claude-demo
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: claude-code
+          image: claude-code:latest
+          imagePullPolicy: Never  # Using Kind-loaded image
+          command: ["claude", "-p", "--dangerously-skip-permissions", "--verbose", "--output-format", "stream-json", "--model", "$(ANTHROPIC_MODEL)", "--", "$(CLAUDE_PROMPT)"]
+          env:
+            - name: ANTHROPIC_MODEL
+              value: "claude-haiku-4-5-20251001"
+            - name: CLAUDE_PROMPT
+              value: "Print all environment variables you can see"
+          envFrom:
+            - secretRef:
+                name: anthropic-credentials
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"

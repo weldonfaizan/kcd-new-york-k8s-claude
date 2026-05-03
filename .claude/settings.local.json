@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(kind *)",
+      "Bash(bash **/*.sh)",
+      "Bash(source .env:*)",
+      "Bash(kubectl *)",
+      "Bash(docker *)",
+      "Bash(source /Users/carrlos/dev/eks/kcd-new-york-k8s-claude/.env && gh auth status --hostname github.com 2>&1 | head -5)",
+      "Bash(git commit:*)",
+      "Bash(grep -rn \"GITHUB_PAT\" /Users/carrlos/dev/eks/kcd-new-york-k8s-claude --include=\"*.yaml\" --include=\"*.sh\" --include=\"*.md\" --include=\"*.example\" --include=\"*.js\" 2>/dev/null | grep -v \".git/\")",
+      "Bash(grep -rn \"GITHUB_PAT\" /Users/carrlos/dev/eks/kcd-new-york-k8s-claude --include=\"*.yaml\" --include=\"*.sh\" --include=\"*.md\" --include=\"*.example\" 2>/dev/null | grep -v \".git/\")",
+      "Bash(kubectl logs:*)"
+    ]
+  }
+}

@@ -1,0 +1,93 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: claude-developer
+  namespace: claude-demo
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      volumes:
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: claude-workspace-pvc
+        - name: claude-memory
+          persistentVolumeClaim:
+            claimName: claude-memory-pvc
+        - name: scripts
+          configMap:
+            name: developer-config
+            items:
+              - key: entrypoint.sh
+                path: entrypoint.sh
+                mode: 0755
+        - name: prompt
+          configMap:
+            name: developer-config
+            items:
+              - key: developer-prompt
+                path: developer.md
+
+      # Native sidecar: starts before main containers, stops when they finish
+      initContainers:
+        - name: proxy-sidecar
+          image: credential-proxy:latest
+          imagePullPolicy: Never
+          restartPolicy: Always   # This is what makes it a sidecar (K8s 1.29+)
+          env:
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: agent-credentials
+                  key: ANTHROPIC_API_KEY
+            - name: GH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: agent-credentials
+                  key: GH_TOKEN
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "100m"
+
+      containers:
+        # Main container: Claude Code developer agent
+        - name: claude-code
+          image: claude-code:latest
+          imagePullPolicy: Never
+          command: ["/bin/bash", "/scripts/entrypoint.sh"]
+          env:
+            - name: ANTHROPIC_API_KEY
+              value: "FAKE_KEY_REPLACED_BY_PROXY"
+            - name: ANTHROPIC_BASE_URL
+              value: "http://localhost:8080"
+            # GH_TOKEN is the official env var read by gh CLI and git credential helpers
+            - name: GH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: agent-credentials
+                  key: GH_TOKEN
+          envFrom:
+            - configMapRef:
+                name: developer-config
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: claude-memory
+              mountPath: /home/claude/.claude
+            - name: scripts
+              mountPath: /scripts
+            - name: prompt
+              mountPath: /prompts
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "200m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
