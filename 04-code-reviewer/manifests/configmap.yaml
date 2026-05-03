@@ -1,10 +1,10 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: agent-config
+  name: reviewer-config
   namespace: claude-demo
 data:
-  TARGET_REPO: "csantanapr/kcd-nyc-hello"
+  TARGET_REPO: "${TESTING_REPO}"
   ANTHROPIC_MODEL: "claude-haiku-4-5-20251001"
   AGENT_GIT_EMAIL: "claude-reviewer@bot.local"
   AGENT_GIT_NAME: "Claude Reviewer"

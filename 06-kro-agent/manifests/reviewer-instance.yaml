@@ -6,7 +6,7 @@ metadata:
 spec:
   agentName: "Claude Reviewer"
   agentEmail: "claude-reviewer@bot.local"
-  repo: csantanapr/kcd-nyc-hello
+  repo: "${TESTING_REPO}"
   schedule: "0 */4 * * *"
   prompt: |
     You are an autonomous code review agent for the GitHub repository specified in TARGET_REPO.

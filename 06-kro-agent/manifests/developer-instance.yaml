@@ -6,7 +6,7 @@ metadata:
 spec:
   agentName: "Claude Developer"
   agentEmail: "claude-developer@bot.local"
-  repo: csantanapr/kcd-nyc-hello
+  repo: "${TESTING_REPO}"
   task: ""
   sessionResume: true
   prompt: |

@@ -37,7 +37,7 @@ An autonomous code review agent that runs on a CronJob, checks for open PRs, rev
 - Claude Code image loaded (see [02-claude-k8s-job](../02-claude-k8s-job/))
 - Proxy image loaded (see [03-sidecar-proxy](../03-sidecar-proxy/))
 - `.env` file with both `ANTHROPIC_API_KEY` and `GH_TOKEN` set
-- A GitHub repo with open PRs (default: `csantanapr/kcd-nyc-hello`)
+- `TESTING_REPO` set in `.env` (see [Target Repo Setup](../README.md#target-repo-setup))
 
 ## Step-by-Step
 
@@ -52,7 +52,8 @@ kubectl create secret generic agent-credentials \
 ### 2. Apply the ConfigMap and run the Job
 
 ```bash
-kubectl apply -f manifests/configmap.yaml
+set -a && source ../../.env && set +a
+envsubst '$TESTING_REPO' < manifests/configmap.yaml | kubectl apply -f -
 kubectl apply -f manifests/job.yaml
 ```
 

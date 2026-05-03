@@ -17,14 +17,14 @@ spec:
           volumes:
             - name: scripts
               configMap:
-                name: agent-config
+                name: reviewer-config
                 items:
                   - key: entrypoint.sh
                     path: entrypoint.sh
                     mode: 0755
             - name: prompt
               configMap:
-                name: agent-config
+                name: reviewer-config
                 items:
                   - key: agent-prompt
                     path: prompt.md
@@ -84,7 +84,7 @@ spec:
                   value: "FAKE_GH_TOKEN_REPLACED_BY_PROXY"
               envFrom:
                 - configMapRef:
-                    name: agent-config
+                    name: reviewer-config
               volumeMounts:
                 - name: scripts
                   mountPath: /scripts

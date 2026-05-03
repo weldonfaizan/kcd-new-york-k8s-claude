@@ -11,8 +11,9 @@ A progressive, hands-on guide showing how to run Claude Code as an AI agent on K
 - Docker
 - [kind](https://kind.sigs.k8s.io/) (Kubernetes in Docker)
 - kubectl
+- `envsubst` (included with `gettext` — pre-installed on most systems)
 - An Anthropic API key (`ANTHROPIC_API_KEY`)
-- A GitHub PAT with `repo` scope (for concepts 04-05)
+- A GitHub PAT with write access to your target repo (see [Target Repo Setup](#target-repo-setup))
 
 ## Setup
 
@@ -22,6 +23,33 @@ cd kcd-new-york-k8s-claude
 cp .env.example .env
 # Edit .env and add your real keys
 ```
+
+## Target Repo Setup
+
+Concepts 04-06 need a GitHub repo to operate on. Create one from the template:
+
+1. Go to [`csantanapr/kcd-nyc-hello-template`](https://github.com/csantanapr/kcd-nyc-hello-template) and click **"Use this template"** → **"Create a new repository"**
+2. Name it whatever you like (e.g., `kcd-nyc-hello`) and make it **private** or **public**
+3. Create a **GitHub Personal Access Token** (fine-grained) with access to your new repo:
+   - Go to **Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token**
+   - Set **Repository access** to **"Only select repositories"** and pick your new repo
+   - Under **Repository permissions**, grant:
+     - **Contents**: Read and write (clone, push)
+     - **Pull requests**: Read and write (create, comment, merge PRs)
+     - **Metadata**: Read-only (required by default)
+4. Set both values in your `.env`:
+   ```bash
+   # .env
+   GH_TOKEN=github_pat_REPLACE_ME
+   TESTING_REPO=YOUR_USERNAME/kcd-nyc-hello
+   ```
+
+Manifests use `envsubst` to inject the repo at apply-time — no manual YAML editing needed:
+```bash
+set -a && source .env && set +a
+envsubst '$TESTING_REPO' < manifests/configmap.yaml | kubectl apply -f -
+```
+`set -a` exports all variables so `envsubst` can see them. The `'$TESTING_REPO'` argument restricts substitution to only that variable, leaving other `${}` references (used by shell scripts inside ConfigMaps) untouched. See each concept's README for the exact apply commands.
 
 ## Concepts
 
@@ -57,4 +85,4 @@ kubectl logs -f job/claude-hello -n claude-demo
 
 - All examples use `claude-haiku-4-5-20251001` model for cost efficiency. Change the model in manifests to use a different one.
 - The credential security pattern (sidecar proxy) is introduced in concept 03 and used in all subsequent concepts.
-- Default test repo for PR operations: `csantanapr/kcd-nyc-hello` (private).
+- Target repo for PR operations is configured via `TESTING_REPO` in `.env` (see [Target Repo Setup](#target-repo-setup)).

@@ -40,7 +40,7 @@ An autonomous developer agent that implements features, submits PRs, and address
 - Claude Code image loaded (see [02-claude-k8s-job](../02-claude-k8s-job/))
 - Proxy image loaded (see [03-sidecar-proxy](../03-sidecar-proxy/))
 - `.env` file with both `ANTHROPIC_API_KEY` and `GH_TOKEN` set
-- A GitHub repo to develop against (default: `csantanapr/kcd-nyc-hello`)
+- `TESTING_REPO` set in `.env` (see [Target Repo Setup](../README.md#target-repo-setup))
 
 ## Step-by-Step
 
@@ -63,7 +63,8 @@ kubectl create secret generic agent-credentials \
 The agent reads its feature roadmap from `SPEC.md` in the target repo. Apply the config:
 
 ```bash
-kubectl apply -f manifests/configmap.yaml
+set -a && source ../../.env && set +a
+envsubst '$TESTING_REPO' < manifests/configmap.yaml | kubectl apply -f -
 ```
 
 ### 4. Run the Developer Agent

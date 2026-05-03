@@ -51,13 +51,15 @@ kubectl get crd claudecodeagents.kro.run
 ### 3. Deploy a Reviewer (CronJob mode)
 
 ```bash
-kubectl apply -f 06-kro-agent/manifests/reviewer-instance.yaml
+set -a && source ../../.env && set +a
+envsubst '$TESTING_REPO' < 06-kro-agent/manifests/reviewer-instance.yaml | kubectl apply -f -
 ```
 
 ### 4. Deploy a Developer (Job mode)
 
 ```bash
-kubectl apply -f 06-kro-agent/manifests/developer-instance.yaml
+set -a && source ../../.env && set +a
+envsubst '$TESTING_REPO' < 06-kro-agent/manifests/developer-instance.yaml | kubectl apply -f -
 ```
 
 ## How to Verify
