@@ -55,7 +55,7 @@ kubectl apply -f manifests/pvc.yaml
 ```bash
 kubectl create secret generic agent-credentials \
   --from-env-file=../../.env \
-  -n claude-demo
+  -n 05-developer-agent
 ```
 
 ### 3. Apply the ConfigMap
@@ -76,7 +76,7 @@ kubectl apply -f manifests/job.yaml
 ### 5. Watch the output
 
 ```bash
-kubectl logs -f job/claude-developer -c claude-code -n claude-demo
+kubectl logs -f job/claude-developer -c claude-code -n 05-developer-agent
 ```
 
 ### 6. Re-run after review comments
@@ -84,7 +84,7 @@ kubectl logs -f job/claude-developer -c claude-code -n claude-demo
 After the Code Reviewer (concept 04) or a human leaves comments on the PR, delete the completed job and re-run:
 
 ```bash
-kubectl delete job claude-developer -n claude-demo
+kubectl delete job claude-developer -n 05-developer-agent
 kubectl apply -f manifests/job.yaml
 ```
 
@@ -141,7 +141,7 @@ All roadmap features are implemented!
 ```bash
 kubectl delete -f manifests/job.yaml
 kubectl delete -f manifests/configmap.yaml
-kubectl delete secret agent-credentials -n claude-demo
+kubectl delete secret agent-credentials -n 05-developer-agent
 # To fully reset (lose workspace and memory):
 kubectl delete -f manifests/pvc.yaml
 ```

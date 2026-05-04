@@ -88,9 +88,9 @@ kind load docker-image credential-proxy:latest --name claude-demo
 ### 2. Create the Secret (real keys for sidecar only)
 
 ```bash
-kubectl create secret generic anthropic-credentials \
+kubectl create secret generic agent-credentials \
   --from-env-file=../../.env \
-  -n claude-demo
+  -n 03-sidecar-proxy
 ```
 
 ### 3. Run the Job
@@ -102,7 +102,7 @@ kubectl apply -f manifests/job.yaml
 ### 4. Watch the output
 
 ```bash
-kubectl logs -f job/claude-hello-secure -c claude-code -n claude-demo
+kubectl logs -f job/claude-hello-secure -c claude-code -n 03-sidecar-proxy
 ```
 
 ## How to Verify
@@ -110,7 +110,7 @@ kubectl logs -f job/claude-hello-secure -c claude-code -n claude-demo
 Exec into the main container and check the environment — you should only see fake values:
 
 ```bash
-kubectl exec job/claude-hello-secure -c claude-code -n claude-demo -- env | grep -E 'ANTHROPIC_API_KEY|GH_TOKEN'
+kubectl exec job/claude-hello-secure -c claude-code -n 03-sidecar-proxy -- env | grep -E 'ANTHROPIC_API_KEY|GH_TOKEN'
 ```
 
 Expected:
@@ -121,7 +121,7 @@ GH_TOKEN=FAKE_GH_TOKEN_REPLACED_BY_PROXY
 
 The real keys only exist in the sidecar:
 ```bash
-kubectl exec job/claude-hello-secure -c proxy-sidecar -n claude-demo -- env | grep -E 'ANTHROPIC|GH_TOKEN'
+kubectl exec job/claude-hello-secure -c proxy-sidecar -n 03-sidecar-proxy -- env | grep -E 'ANTHROPIC|GH_TOKEN'
 ```
 
 ## Expected Output
@@ -132,5 +132,5 @@ Claude Code should work normally (the proxy transparently injects the real key),
 
 ```bash
 kubectl delete -f manifests/job.yaml
-kubectl delete secret anthropic-credentials -n claude-demo
+kubectl delete secret agent-credentials -n 03-sidecar-proxy
 ```

@@ -2,7 +2,7 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: claude-workspace-pvc
-  namespace: claude-demo
+  namespace: 05-developer-agent
 spec:
   accessModes:
     - ReadWriteOnce
@@ -14,7 +14,7 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: claude-memory-pvc
-  namespace: claude-demo
+  namespace: 05-developer-agent
 spec:
   accessModes:
     - ReadWriteOnce

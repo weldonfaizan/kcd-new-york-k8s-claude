@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euo pipefail
+set -e
 
 # Configure git identity
 git config --global user.email "claude-reviewer@bot.local"
@@ -20,6 +20,15 @@ echo "Target repo: ${TARGET_REPO}"
 echo "Model: ${ANTHROPIC_MODEL}"
 echo "---"
 
-# Run Claude Code in non-interactive mode
-exec claude -p --dangerously-skip-permissions --verbose --output-format stream-json \
-  --model "${ANTHROPIC_MODEL}" -- "${PROMPT}"
+# Run Claude Code with stream-json output, filtered through jq for readable logs
+claude -p --dangerously-skip-permissions --verbose --output-format stream-json \
+  --model "${ANTHROPIC_MODEL}" -- "${PROMPT}" \
+  | jq --unbuffered -r '
+if .type == "assistant" then
+  .message.content[]? |
+  if .type == "text" then ">>> " + .text[0:5000]
+  elif .type == "tool_use" then "[" + .name + "] " + ((.input | tostring)[0:3000])
+  else empty end
+elif .type == "result" then
+  "[done] " + (.result // "complete")[0:5000]
+else empty end'

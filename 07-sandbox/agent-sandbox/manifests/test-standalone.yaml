@@ -2,7 +2,7 @@ apiVersion: kro.run/v1alpha1
 kind: ClaudeCodeAgentSandbox
 metadata:
   name: sandbox-test
-  namespace: claude-demo
+  namespace: 07-sandbox
 spec:
   agentName: "Sandbox Tester"
   repo: "none"

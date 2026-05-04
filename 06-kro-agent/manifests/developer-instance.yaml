@@ -2,7 +2,7 @@ apiVersion: kro.run/v1alpha1
 kind: ClaudeCodeAgent
 metadata:
   name: claude-developer
-  namespace: claude-demo
+  namespace: 06-kro-agent
 spec:
   agentName: "Claude Developer"
   agentEmail: "claude-developer@bot.local"

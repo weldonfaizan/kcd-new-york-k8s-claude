@@ -2,7 +2,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: claude-hello-secure
-  namespace: claude-demo
+  namespace: 03-sidecar-proxy
 spec:
   backoffLimit: 0
   template:
@@ -22,12 +22,12 @@ spec:
             - name: ANTHROPIC_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: anthropic-credentials
+                  name: agent-credentials
                   key: ANTHROPIC_API_KEY
             - name: GH_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: anthropic-credentials
+                  name: agent-credentials
                   key: GH_TOKEN
                   optional: true
           volumeMounts:
@@ -55,7 +55,21 @@ spec:
         - name: claude-code
           image: claude-code:latest
           imagePullPolicy: Never
-          command: ["claude", "-p", "--dangerously-skip-permissions", "--verbose", "--output-format", "stream-json", "--model", "$(ANTHROPIC_MODEL)", "--", "$(PROMPT)"]
+          command:
+            - /bin/bash
+            - -c
+            - |
+              claude -p --dangerously-skip-permissions --verbose --output-format stream-json \
+                --model "${ANTHROPIC_MODEL}" -- "${PROMPT}" \
+                | jq --unbuffered -r '
+              if .type == "assistant" then
+                .message.content[]? |
+                if .type == "text" then ">>> " + .text[0:5000]
+                elif .type == "tool_use" then "[" + .name + "] " + ((.input | tostring)[0:3000])
+                else empty end
+              elif .type == "result" then
+                "[done] " + (.result // "complete")[0:5000]
+              else empty end'
           env:
             - name: ANTHROPIC_API_KEY
               value: "FAKE_KEY_REPLACED_BY_PROXY"

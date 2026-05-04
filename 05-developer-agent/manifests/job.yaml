@@ -2,7 +2,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: claude-developer
-  namespace: claude-demo
+  namespace: 05-developer-agent
 spec:
   backoffLimit: 0
   activeDeadlineSeconds: 3600

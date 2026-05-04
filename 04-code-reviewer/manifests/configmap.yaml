@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: reviewer-config
-  namespace: claude-demo
+  namespace: 04-code-reviewer
 data:
   TARGET_REPO: "${TESTING_REPO}"
   ANTHROPIC_MODEL: "claude-haiku-4-5-20251001"
@@ -14,7 +14,7 @@ data:
   # TARGET_REPO, FEATURE_REQUEST (optional), ENABLE_SESSION_RESUME (optional)
   entrypoint.sh: |
     #!/bin/bash
-    set -euo pipefail
+    set -e
 
     git config --global user.email "${AGENT_GIT_EMAIL:-claude-agent@bot.local}"
     git config --global user.name "${AGENT_GIT_NAME:-Claude Agent}"
@@ -46,21 +46,48 @@ data:
     echo "Model: ${ANTHROPIC_MODEL}"
     echo "---"
 
-    # Session resume (opt-in via ENABLE_SESSION_RESUME=true)
+    # Run Claude Code with stream-json output, filtered through jq for readable logs
     CLAUDE_ARGS="-p --dangerously-skip-permissions --verbose --output-format stream-json --model ${ANTHROPIC_MODEL}"
+
+    # Session resume (opt-in via ENABLE_SESSION_RESUME=true)
     if [ "${ENABLE_SESSION_RESUME:-}" = "true" ]; then
       PREV_RUN_FLAG="/home/claude/.claude/.agent-ran"
       if [ -f "$PREV_RUN_FLAG" ]; then
         echo "Previous session found — resuming with --continue"
-        exec claude $CLAUDE_ARGS --continue -- "${PROMPT}"
+        CLAUDE_ARGS="$CLAUDE_ARGS --continue"
       else
         echo "First run — starting fresh session"
-        claude $CLAUDE_ARGS -- "${PROMPT}"
-        touch "$PREV_RUN_FLAG"
       fi
-    else
-      exec claude $CLAUDE_ARGS -- "${PROMPT}"
     fi
+
+    RAW_LOG="/tmp/claude-raw-$(date +%s).jsonl"
+    CLAUDE_EXIT=0
+
+    timeout 3600 claude $CLAUDE_ARGS -- "$PROMPT" \
+      | tee "$RAW_LOG" \
+      | jq --unbuffered -r '
+    if .type == "assistant" then
+      .message.content[]? |
+      if .type == "text" then ">>> " + .text[0:5000]
+      elif .type == "tool_use" then "[" + .name + "] " + ((.input | tostring)[0:3000])
+      else empty end
+    elif .type == "result" then
+      "[done] " + (.result // "complete")[0:5000]
+    else empty end' || CLAUDE_EXIT=$?
+
+    # Mark session for resume on next run
+    if [ "${ENABLE_SESSION_RESUME:-}" = "true" ] && [ "$CLAUDE_EXIT" -eq 0 ]; then
+      touch "/home/claude/.claude/.agent-ran"
+    fi
+
+    # If Claude timed out, salvage partial results
+    if [ "$CLAUDE_EXIT" -eq 124 ]; then
+      echo "=== TIMEOUT: Claude exceeded time limit ==="
+      timeout 300 claude -p --dangerously-skip-permissions -- \
+        "The previous process timed out. Check what partial results exist and write a summary to /tmp/partial-report.md."
+    fi
+
+    echo "=== Complete (exit: $CLAUDE_EXIT) ==="
 
   # Prompt mounted into the container at /prompts/prompt.md
   agent-prompt: |

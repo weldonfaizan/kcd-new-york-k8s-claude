@@ -16,13 +16,24 @@ From a single `ClaudeCodeAgent` instance, KRO creates 5 resources:
 
 ## Prerequisites
 
-- Completed concepts 01-05 (Kind cluster running, images built)
+- Completed concepts [01](../01-kind-cluster/) through [05](../05-developer-agent/) (Kind cluster running, images built)
 - [KRO installed](https://kro.run/docs/getting-started/Installation) in the cluster
-- Secret `agent-credentials` exists in `claude-demo` namespace
 
 ## Step-by-Step
 
-### 1. Install KRO (if not already installed)
+### 1. Create the namespace and secret
+
+```bash
+kubectl create namespace 06-kro-agent 2>/dev/null || true
+
+set -a && source .env && set +a
+kubectl create secret generic agent-credentials \
+  --from-literal=ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY \
+  --from-literal=GH_TOKEN=$GH_TOKEN \
+  -n 06-kro-agent
+```
+
+### 2. Install KRO (if not already installed)
 
 ```bash
 # Check if kro is running
@@ -36,7 +47,7 @@ helm install kro oci://registry.k8s.io/kro/charts/kro \
 # Learn more: https://kro.run/docs/getting-started/Installation
 ```
 
-### 2. Apply the ResourceGraphDefinition
+### 3. Apply the ResourceGraphDefinition
 
 ```bash
 kubectl apply -f 06-kro-agent/manifests/rgd.yaml
@@ -48,14 +59,14 @@ Verify the CRD was generated:
 kubectl get crd claudecodeagents.kro.run
 ```
 
-### 3. Deploy a Reviewer (CronJob mode)
+### 4. Deploy a Reviewer (CronJob mode)
 
 ```bash
 set -a && source ../../.env && set +a
 envsubst '$TESTING_REPO' < 06-kro-agent/manifests/reviewer-instance.yaml | kubectl apply -f -
 ```
 
-### 4. Deploy a Developer (Job mode)
+### 5. Deploy a Developer (Job mode)
 
 ```bash
 set -a && source ../../.env && set +a
@@ -66,34 +77,34 @@ envsubst '$TESTING_REPO' < 06-kro-agent/manifests/developer-instance.yaml | kube
 
 ```bash
 # Check the custom resources
-kubectl get claudecodeagent -n claude-demo
+kubectl get claudecodeagent -n 06-kro-agent
 
 # See what KRO created for the reviewer (CronJob + ConfigMap + PVCs)
-kubectl get configmap,pvc,cronjob -n claude-demo -l app.kubernetes.io/managed-by=kro
+kubectl get configmap,pvc,cronjob -n 06-kro-agent -l app.kubernetes.io/managed-by=kro
 
 # See what KRO created for the developer (Job + ConfigMap + PVCs)
-kubectl get configmap,pvc,job -n claude-demo -l app.kubernetes.io/managed-by=kro
+kubectl get configmap,pvc,job -n 06-kro-agent -l app.kubernetes.io/managed-by=kro
 
 # Trigger a manual reviewer run
-kubectl create job --from=cronjob/claude-reviewer claude-reviewer-manual -n claude-demo
+kubectl create job --from=cronjob/claude-reviewer claude-reviewer-manual -n 06-kro-agent
 
 # Watch logs
-kubectl logs job/claude-reviewer-manual -c claude-code -n claude-demo -f
-kubectl logs job/claude-developer -c claude-code -n claude-demo -f
+kubectl logs job/claude-reviewer-manual -c claude-code -n 06-kro-agent -f
+kubectl logs job/claude-developer -c claude-code -n 06-kro-agent -f
 
 # Verify fake credentials in main container (not real secrets)
-kubectl exec job/claude-developer -c claude-code -n claude-demo -- env | grep -E 'API_KEY|GH_TOKEN'
+kubectl exec job/claude-developer -c claude-code -n 06-kro-agent -- env | grep -E 'API_KEY|GH_TOKEN'
 ```
 
 ## Expected Output
 
 ```
-# kubectl get claudecodeagent -n claude-demo
+# kubectl get claudecodeagent -n 06-kro-agent
 NAME               AGE
 claude-reviewer    10s
 claude-developer   5s
 
-# kubectl get configmap,pvc,cronjob,job -n claude-demo
+# kubectl get configmap,pvc,cronjob,job -n 06-kro-agent
 NAME                              DATA   AGE
 configmap/claude-reviewer-config  8      10s
 configmap/claude-developer-config 8      5s
@@ -115,7 +126,7 @@ job.batch/claude-developer  0/1           5s         5s
 
 ```bash
 # Delete instances (KRO garbage-collects all child resources)
-kubectl delete claudecodeagent claude-reviewer claude-developer -n claude-demo
+kubectl delete claudecodeagent claude-reviewer claude-developer -n 06-kro-agent
 
 # Remove the RGD
 kubectl delete -f 06-kro-agent/manifests/rgd.yaml

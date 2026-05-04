@@ -78,10 +78,10 @@ cd 01-kind-cluster && bash scripts/create-cluster.sh && cd ..
 # 3. Run your first Claude Code job
 cd 02-claude-k8s-job && bash scripts/build-and-load.sh
 source ../../.env
-kubectl create secret generic anthropic-credentials \
-  --from-literal=ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY -n claude-demo
+kubectl create secret generic agent-credentials \
+  --from-literal=ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY -n 02-claude-k8s-job
 kubectl apply -f manifests/job.yaml
-kubectl logs -f job/claude-hello -n claude-demo
+kubectl logs -f job/claude-hello -n 02-claude-k8s-job
 ```
 
 ## Notes

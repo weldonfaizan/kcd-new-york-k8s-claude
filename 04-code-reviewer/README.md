@@ -46,7 +46,7 @@ An autonomous code review agent that runs on a CronJob, checks for open PRs, rev
 ```bash
 kubectl create secret generic agent-credentials \
   --from-env-file=../../.env \
-  -n claude-demo
+  -n 04-code-reviewer
 ```
 
 ### 2. Apply the ConfigMap and run the Job
@@ -61,13 +61,13 @@ kubectl apply -f manifests/job.yaml
 ### 3. Watch the output
 
 ```bash
-kubectl logs -f job/claude-reviewer -c claude-code -n claude-demo
+kubectl logs -f job/claude-reviewer -c claude-code -n 04-code-reviewer
 ```
 
 ### 4. Re-run (delete completed job and re-apply)
 
 ```bash
-kubectl delete job claude-reviewer -n claude-demo
+kubectl delete job claude-reviewer -n 04-code-reviewer
 kubectl apply -f manifests/job.yaml
 ```
 
@@ -96,5 +96,5 @@ Done. Reviewed 1 PR, skipped 1.
 ```bash
 kubectl delete -f manifests/job.yaml
 kubectl delete -f manifests/configmap.yaml
-kubectl delete secret agent-credentials -n claude-demo
+kubectl delete secret agent-credentials -n 04-code-reviewer
 ```

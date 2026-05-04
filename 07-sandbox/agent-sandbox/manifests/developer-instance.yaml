@@ -2,7 +2,7 @@ apiVersion: kro.run/v1alpha1
 kind: ClaudeCodeAgentSandbox
 metadata:
   name: claude-developer
-  namespace: claude-demo
+  namespace: 07-sandbox
 spec:
   agentName: "Claude Developer"
   agentEmail: "claude-developer@bot.local"

@@ -2,7 +2,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: claude-hello
-  namespace: claude-demo
+  namespace: 02-claude-k8s-job
 spec:
   backoffLimit: 0
   template:
@@ -12,7 +12,21 @@ spec:
         - name: claude-code
           image: claude-code:latest
           imagePullPolicy: Never  # Using Kind-loaded image
-          command: ["claude", "-p", "--dangerously-skip-permissions", "--verbose", "--output-format", "stream-json", "--model", "$(ANTHROPIC_MODEL)", "--", "$(PROMPT)"]
+          command:
+            - /bin/bash
+            - -c
+            - |
+              claude -p --dangerously-skip-permissions --verbose --output-format stream-json \
+                --model "${ANTHROPIC_MODEL}" -- "${PROMPT}" \
+                | jq --unbuffered -r '
+              if .type == "assistant" then
+                .message.content[]? |
+                if .type == "text" then ">>> " + .text[0:5000]
+                elif .type == "tool_use" then "[" + .name + "] " + ((.input | tostring)[0:3000])
+                else empty end
+              elif .type == "result" then
+                "[done] " + (.result // "complete")[0:5000]
+              else empty end'
           env:
             - name: ANTHROPIC_MODEL
               value: "claude-haiku-4-5-20251001"
@@ -20,7 +34,7 @@ spec:
               value: "Print all environment variables you can see"
           envFrom:
             - secretRef:
-                name: anthropic-credentials
+                name: agent-credentials
           resources:
             requests:
               memory: "256Mi"
