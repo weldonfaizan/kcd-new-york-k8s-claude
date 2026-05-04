@@ -14,8 +14,9 @@ spec:
       repo: string | required=true description="GitHub repository (owner/repo)"
       task: string | default="" description="Optional task description passed as AGENT_TASK env var"
       prompt: string | required=true description="Full agent prompt (mounted at /prompts/prompt.md)"
+      schedule: string | default="" description="Cron schedule (empty = one-shot Sandbox, cron = CronJob + Sandbox execution backend)"
       sessionResume: boolean | default=false description="Enable session resume across runs"
-      allowedLocalCommands: string | default="git,gh" description="Comma-separated commands that run locally instead of in the sandbox"
+      allowedLocalCommands: string | default="git,gh" description="Comma-separated commands that run locally in CronJob mode (ignored in Sandbox-only mode)"
       credentials:
         secretName: string | required=true description="Name of the Secret containing ANTHROPIC_API_KEY and GH_TOKEN"
 
@@ -24,7 +25,7 @@ spec:
 
   resources:
 
-    # --- 1. ConfigMap: agent configuration, scripts, MCP server, sandbox runtime, and prompt ---
+    # --- 1. ConfigMap: agent configuration, scripts, and prompt ---
     - id: agentConfig
       template:
         apiVersion: v1
@@ -42,8 +43,87 @@ spec:
           SANDBOX_URL: http://${schema.metadata.name}-sandbox.${schema.metadata.namespace}.svc.cluster.local:8888
           ALLOWED_LOCAL_COMMANDS: ${schema.spec.allowedLocalCommands}
 
-          # --- Job entrypoint: waits for sandbox, then runs Claude Code with MCP ---
-          entrypoint.sh: |
+          # --- Sandbox-only entrypoint: runs Claude Code with full Bash (the sandbox IS the isolation) ---
+          standalone-entrypoint.sh: |
+            #!/bin/bash
+            set -e
+
+            git config --global user.email "${"${AGENT_GIT_EMAIL:-claude-agent@bot.local}"}"
+            git config --global user.name "${"${AGENT_GIT_NAME:-Claude Agent}"}"
+
+            # Route only git and gh through the credential proxy (not all HTTPS traffic)
+            if [ -f /certs/combined-ca.crt ]; then
+              git config --global http.proxy http://127.0.0.1:8080
+              git config --global http.sslCAInfo /certs/combined-ca.crt
+              mkdir -p "$HOME/bin"
+              cat > "$HOME/bin/gh" << 'GHWRAPPER'
+            #!/bin/bash
+            exec env HTTPS_PROXY=http://127.0.0.1:8080 SSL_CERT_FILE=/certs/combined-ca.crt /usr/bin/gh "$@"
+            GHWRAPPER
+              chmod +x "$HOME/bin/gh"
+              export PATH="$HOME/bin:$PATH"
+            fi
+
+            # Build prompt: inject env vars as context, then append the prompt file
+            PROMPT="TARGET_REPO=${"${TARGET_REPO}"}"
+            [ -n "${"${AGENT_TASK:-}"}" ] && PROMPT="${"${PROMPT}"}
+            AGENT_TASK=${"${AGENT_TASK:-}"}"
+            PROMPT="${"${PROMPT}"}
+
+            $(cat /prompts/prompt.md)"
+
+            echo "Starting ${"${AGENT_GIT_NAME:-Claude Agent}"}..."
+            echo "Target repo: ${"${TARGET_REPO}"}"
+            [ -n "${"${AGENT_TASK:-}"}" ] && echo "Task: ${"${AGENT_TASK}"}"
+            echo "Model: ${"${ANTHROPIC_MODEL}"}"
+            echo "Mode: sandbox (full Bash)"
+            echo "---"
+
+            # Standard Claude Code with full Bash access — the Sandbox provides isolation
+            CLAUDE_ARGS="-p --dangerously-skip-permissions --verbose --output-format stream-json --model ${"${ANTHROPIC_MODEL}"}"
+
+            # Session resume (opt-in via ENABLE_SESSION_RESUME=true)
+            if [ "${"${ENABLE_SESSION_RESUME:-}"}" = "true" ]; then
+              PREV_RUN_FLAG="/home/claude/.claude/.agent-ran"
+              if [ -f "$PREV_RUN_FLAG" ]; then
+                echo "Previous session found — resuming with --continue"
+                CLAUDE_ARGS="$CLAUDE_ARGS --continue"
+              else
+                echo "First run — starting fresh session"
+              fi
+            fi
+
+            RAW_LOG="/tmp/claude-raw-$(date +%s).jsonl"
+            CLAUDE_EXIT=0
+
+            timeout 3600 claude $CLAUDE_ARGS -- "$PROMPT" \
+              | tee "$RAW_LOG" \
+              | jq --unbuffered -r '
+            if .type == "assistant" then
+              .message.content[]? |
+              if .type == "text" then ">>> " + .text[0:5000]
+              elif .type == "tool_use" then "[" + .name + "] " + ((.input | tostring)[0:3000])
+              else empty end
+            elif .type == "result" then
+              "[done] " + (.result // "complete")[0:5000]
+            else empty end' || CLAUDE_EXIT=$?
+
+            # Mark session for resume on next run
+            if [ "${"${ENABLE_SESSION_RESUME:-}"}" = "true" ] && [ "$CLAUDE_EXIT" -eq 0 ]; then
+              touch "/home/claude/.claude/.agent-ran"
+            fi
+
+            # If Claude timed out, salvage partial results
+            if [ "$CLAUDE_EXIT" -eq 124 ]; then
+              echo "=== TIMEOUT: Claude exceeded time limit ==="
+              timeout 300 claude -p --dangerously-skip-permissions -- \
+                "The previous process timed out. Check what partial results exist and write a summary to /tmp/partial-report.md."
+            fi
+
+            echo "=== Complete (exit: $CLAUDE_EXIT) ==="
+
+          # --- CronJob entrypoint: waits for sandbox, runs Claude Code with MCP routing ---
+          cronjob-entrypoint.sh: |
             #!/bin/bash
             set -e
 
@@ -82,11 +162,12 @@ spec:
             echo "Target repo: ${"${TARGET_REPO}"}"
             [ -n "${"${AGENT_TASK:-}"}" ] && echo "Task: ${"${AGENT_TASK}"}"
             echo "Model: ${"${ANTHROPIC_MODEL}"}"
+            echo "Mode: cronjob (MCP sandbox routing)"
             echo "Sandbox: ${"${SANDBOX_URL}"}"
             echo "Allowed local: ${"${ALLOWED_LOCAL_COMMANDS}"}"
             echo "---"
 
-            # Run Claude Code with stream-json output, filtered through jq for readable logs
+            # Claude Code with Bash disabled — commands routed via MCP to sandbox
             CLAUDE_ARGS="-p --dangerously-skip-permissions --verbose --output-format stream-json --model ${"${ANTHROPIC_MODEL}"} --disallowedTools Bash --mcp-config /mcp/config.json"
 
             # Session resume (opt-in via ENABLE_SESSION_RESUME=true)
@@ -129,8 +210,8 @@ spec:
 
             echo "=== Complete (exit: $CLAUDE_EXIT) ==="
 
-          # --- Sandbox entrypoint: configures git and starts the SDK-compatible runtime ---
-          sandbox-entrypoint.sh: |
+          # --- Sandbox runtime entrypoint: configures git and starts the SDK-compatible API ---
+          sandbox-runtime-entrypoint.sh: |
             #!/bin/bash
             set -euo pipefail
 
@@ -241,7 +322,7 @@ spec:
           mcp-server.py: |
             """MCP server that routes commands between local execution and sandbox.
 
-            Whitelisted commands (git, gh, etc.) run locally in the Job pod.
+            Whitelisted commands (git, gh, etc.) run locally in the CronJob pod.
             Everything else is forwarded to the sandbox via the agent-sandbox
             SDK-compatible HTTP API, with automatic file sync.
 
@@ -367,8 +448,27 @@ spec:
 
           agent-prompt: ${schema.spec.prompt}
 
-    # --- 2. PVC: Claude memory for session resume ---
+    # --- 2. PVC: workspace for cloned repos (CronJob mode only) ---
+    - id: workspacePvc
+      includeWhen:
+        - ${schema.spec.schedule != ""}
+      template:
+        apiVersion: v1
+        kind: PersistentVolumeClaim
+        metadata:
+          name: ${schema.metadata.name}-workspace
+          namespace: ${schema.metadata.namespace}
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 5Gi
+
+    # --- 3. PVC: Claude memory for session resume (CronJob mode only) ---
     - id: memoryPvc
+      includeWhen:
+        - ${schema.spec.schedule != ""}
       template:
         apiVersion: v1
         kind: PersistentVolumeClaim
@@ -382,8 +482,11 @@ spec:
             requests:
               storage: 1Gi
 
-    # --- 3. Sandbox: isolated command execution environment ---
-    - id: agentSandbox
+    # --- 4. Sandbox-only: full Claude Code environment (when no schedule) ---
+    #     The Sandbox IS the isolation — Claude runs with full Bash access inside it.
+    - id: standaloneSandbox
+      includeWhen:
+        - ${schema.spec.schedule == ""}
       template:
         apiVersion: agents.x-k8s.io/v1alpha1
         kind: Sandbox
@@ -400,6 +503,14 @@ spec:
                 resources:
                   requests:
                     storage: 5Gi
+            - metadata:
+                name: claude-memory
+              spec:
+                accessModes:
+                  - ReadWriteOnce
+                resources:
+                  requests:
+                    storage: 1Gi
 
           podTemplate:
             spec:
@@ -409,72 +520,7 @@ spec:
                   configMap:
                     name: ${agentConfig.metadata.name}
                     items:
-                      - key: sandbox-entrypoint.sh
-                        path: sandbox-entrypoint.sh
-                        mode: 0755
-                      - key: sandbox_runtime.py
-                        path: sandbox_runtime.py
-
-              containers:
-                - name: sandbox-runtime
-                  image: claude-code:latest
-                  imagePullPolicy: Never
-                  command: ["/bin/bash", "/scripts/sandbox-entrypoint.sh"]
-                  env:
-                    - name: GH_TOKEN
-                      valueFrom:
-                        secretKeyRef:
-                          name: ${schema.spec.credentials.secretName}
-                          key: GH_TOKEN
-                    - name: SANDBOX_WORKSPACE
-                      value: "/workspace"
-                    - name: PYTHONPATH
-                      value: "/scripts"
-                  envFrom:
-                    - configMapRef:
-                        name: ${agentConfig.metadata.name}
-                  volumeMounts:
-                    - name: workspace
-                      mountPath: /workspace
-                    - name: scripts
-                      mountPath: /scripts
-                  ports:
-                    - containerPort: 8888
-                      protocol: TCP
-                  readinessProbe:
-                    httpGet:
-                      path: /
-                      port: 8888
-                    initialDelaySeconds: 3
-                    periodSeconds: 5
-                  resources:
-                    requests:
-                      memory: "256Mi"
-                      cpu: "100m"
-                    limits:
-                      memory: "512Mi"
-                      cpu: "500m"
-
-    # --- 4. Job: Claude Code CLI with Bash disabled, commands via MCP sandbox ---
-    - id: agentJob
-      template:
-        apiVersion: batch/v1
-        kind: Job
-        metadata:
-          name: ${schema.metadata.name}
-          namespace: ${schema.metadata.namespace}
-        spec:
-          backoffLimit: 0
-          activeDeadlineSeconds: 3600
-          template:
-            spec:
-              restartPolicy: Never
-              volumes:
-                - name: scripts
-                  configMap:
-                    name: ${agentConfig.metadata.name}
-                    items:
-                      - key: entrypoint.sh
+                      - key: standalone-entrypoint.sh
                         path: entrypoint.sh
                         mode: 0755
                 - name: prompt
@@ -483,20 +529,6 @@ spec:
                     items:
                       - key: agent-prompt
                         path: prompt.md
-                - name: mcp
-                  configMap:
-                    name: ${agentConfig.metadata.name}
-                    items:
-                      - key: mcp-server.py
-                        path: server.py
-                      - key: mcp-config.json
-                        path: config.json
-                - name: workspace
-                  persistentVolumeClaim:
-                    claimName: workspace-${agentSandbox.metadata.name}
-                - name: claude-memory
-                  persistentVolumeClaim:
-                    claimName: ${memoryPvc.metadata.name}
                 - name: proxy-certs
                   emptyDir: {}
 
@@ -560,8 +592,6 @@ spec:
                       mountPath: /scripts
                     - name: prompt
                       mountPath: /prompts
-                    - name: mcp
-                      mountPath: /mcp
                     - name: proxy-certs
                       mountPath: /certs
                       readOnly: true
@@ -572,3 +602,196 @@ spec:
                     limits:
                       memory: "1Gi"
                       cpu: "1000m"
+
+    # --- 5. Sandbox execution backend: isolated runtime for CronJob (when schedule is set) ---
+    - id: executionSandbox
+      includeWhen:
+        - ${schema.spec.schedule != ""}
+      template:
+        apiVersion: agents.x-k8s.io/v1alpha1
+        kind: Sandbox
+        metadata:
+          name: ${schema.metadata.name}-sandbox
+          namespace: ${schema.metadata.namespace}
+        spec:
+          podTemplate:
+            spec:
+              restartPolicy: Never
+              volumes:
+                - name: workspace
+                  emptyDir: {}
+                - name: scripts
+                  configMap:
+                    name: ${agentConfig.metadata.name}
+                    items:
+                      - key: sandbox-runtime-entrypoint.sh
+                        path: entrypoint.sh
+                        mode: 0755
+                      - key: sandbox_runtime.py
+                        path: sandbox_runtime.py
+
+              containers:
+                - name: sandbox-runtime
+                  image: claude-code:latest
+                  imagePullPolicy: Never
+                  command: ["/bin/bash", "/scripts/entrypoint.sh"]
+                  env:
+                    - name: GH_TOKEN
+                      valueFrom:
+                        secretKeyRef:
+                          name: ${schema.spec.credentials.secretName}
+                          key: GH_TOKEN
+                    - name: SANDBOX_WORKSPACE
+                      value: "/workspace"
+                    - name: PYTHONPATH
+                      value: "/scripts"
+                  envFrom:
+                    - configMapRef:
+                        name: ${agentConfig.metadata.name}
+                  volumeMounts:
+                    - name: workspace
+                      mountPath: /workspace
+                    - name: scripts
+                      mountPath: /scripts
+                  ports:
+                    - containerPort: 8888
+                      protocol: TCP
+                  readinessProbe:
+                    httpGet:
+                      path: /
+                      port: 8888
+                    initialDelaySeconds: 3
+                    periodSeconds: 5
+                  resources:
+                    requests:
+                      memory: "256Mi"
+                      cpu: "100m"
+                    limits:
+                      memory: "512Mi"
+                      cpu: "500m"
+
+    # --- 6. CronJob: recurring agent with MCP sandbox routing (when schedule is set) ---
+    - id: agentCronJob
+      includeWhen:
+        - ${schema.spec.schedule != ""}
+      template:
+        apiVersion: batch/v1
+        kind: CronJob
+        metadata:
+          name: ${schema.metadata.name}
+          namespace: ${schema.metadata.namespace}
+        spec:
+          schedule: ${schema.spec.schedule}
+          concurrencyPolicy: Forbid
+          successfulJobsHistoryLimit: 3
+          failedJobsHistoryLimit: 3
+          jobTemplate:
+            spec:
+              backoffLimit: 0
+              activeDeadlineSeconds: 3600
+              template:
+                spec:
+                  restartPolicy: Never
+                  volumes:
+                    - name: scripts
+                      configMap:
+                        name: ${agentConfig.metadata.name}
+                        items:
+                          - key: cronjob-entrypoint.sh
+                            path: entrypoint.sh
+                            mode: 0755
+                    - name: prompt
+                      configMap:
+                        name: ${agentConfig.metadata.name}
+                        items:
+                          - key: agent-prompt
+                            path: prompt.md
+                    - name: mcp
+                      configMap:
+                        name: ${agentConfig.metadata.name}
+                        items:
+                          - key: mcp-server.py
+                            path: server.py
+                          - key: mcp-config.json
+                            path: config.json
+                    - name: workspace
+                      persistentVolumeClaim:
+                        claimName: ${workspacePvc.metadata.name}
+                    - name: claude-memory
+                      persistentVolumeClaim:
+                        claimName: ${memoryPvc.metadata.name}
+                    - name: proxy-certs
+                      emptyDir: {}
+
+                  initContainers:
+                    - name: proxy-sidecar
+                      image: credential-proxy:latest
+                      imagePullPolicy: Never
+                      restartPolicy: Always
+                      env:
+                        - name: ANTHROPIC_API_KEY
+                          valueFrom:
+                            secretKeyRef:
+                              name: ${schema.spec.credentials.secretName}
+                              key: ANTHROPIC_API_KEY
+                        - name: GH_TOKEN
+                          valueFrom:
+                            secretKeyRef:
+                              name: ${schema.spec.credentials.secretName}
+                              key: GH_TOKEN
+                      volumeMounts:
+                        - name: proxy-certs
+                          mountPath: /certs
+                      ports:
+                        - containerPort: 8080
+                          protocol: TCP
+                      startupProbe:
+                        exec:
+                          command: ["test", "-f", "/certs/proxy-ca.crt"]
+                        initialDelaySeconds: 1
+                        periodSeconds: 1
+                        failureThreshold: 10
+                      resources:
+                        requests:
+                          memory: "64Mi"
+                          cpu: "50m"
+                        limits:
+                          memory: "128Mi"
+                          cpu: "100m"
+
+                  containers:
+                    - name: claude-code
+                      image: claude-code:latest
+                      imagePullPolicy: Never
+                      command: ["/bin/bash", "/scripts/entrypoint.sh"]
+                      env:
+                        - name: ANTHROPIC_API_KEY
+                          value: "FAKE_KEY_REPLACED_BY_PROXY"
+                        - name: ANTHROPIC_BASE_URL
+                          value: "http://localhost:8080"
+                        - name: GH_TOKEN
+                          value: "FAKE_GH_TOKEN_REPLACED_BY_PROXY"
+                      envFrom:
+                        - configMapRef:
+                            name: ${agentConfig.metadata.name}
+                      volumeMounts:
+                        - name: workspace
+                          mountPath: /workspace
+                        - name: claude-memory
+                          mountPath: /home/claude/.claude
+                        - name: scripts
+                          mountPath: /scripts
+                        - name: prompt
+                          mountPath: /prompts
+                        - name: mcp
+                          mountPath: /mcp
+                        - name: proxy-certs
+                          mountPath: /certs
+                          readOnly: true
+                      resources:
+                        requests:
+                          memory: "512Mi"
+                          cpu: "200m"
+                        limits:
+                          memory: "1Gi"
+                          cpu: "1000m"

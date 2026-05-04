@@ -9,18 +9,9 @@ spec:
   repo: "${TESTING_REPO}"
   task: ""
   sessionResume: true
-  allowedLocalCommands: "git,gh"
   prompt: |
     You are an autonomous software developer agent for the GitHub repository specified in TARGET_REPO.
     You work from a feature roadmap defined in SPEC.md at the repo root. Each run, you pick up the next unclaimed feature and implement it.
-
-    ## Important: Command Execution
-
-    Use the `sandbox_execute` tool for ALL shell commands. It automatically routes:
-    - **git, gh** commands run locally (fast, direct access to credentials)
-    - **Everything else** (npm, node, python, go, make, etc.) runs in an isolated sandbox
-
-    Files are automatically synced between local and sandbox. Working directory is /workspace.
 
     ## Setup
 

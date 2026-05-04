@@ -12,7 +12,10 @@ Run Claude Code agents inside isolated sandboxes so that generated bash commands
 
 [`kubernetes-sigs/agent-sandbox`](https://github.com/kubernetes-sigs/agent-sandbox) provides a `Sandbox` CRD purpose-built for AI agent runtimes on Kubernetes. See [concept 07](./07-sandbox/agent-sandbox/) for the full implementation.
 
-The approach uses `--disallowedTools Bash` to remove the built-in Bash tool, replaced by an MCP server (`sandbox_execute`) that forwards commands to the Sandbox pod's HTTP API. A shared workspace PVC gives filesystem coherence between the agent and sandbox.
+The RGD supports two modes based on the `schedule` field:
+
+- **No schedule (default)** — a single Sandbox runs Claude Code directly with full Bash access. The sandbox IS the isolation boundary. Simplest setup with `volumeClaimTemplates` for persistence.
+- **With schedule** — a CronJob provides scheduling with a separate Sandbox as the execution backend. `--disallowedTools Bash` removes the built-in Bash tool, replaced by an MCP server (`sandbox_execute`) that routes git/gh locally and everything else to the Sandbox's HTTP API.
 
 ### E2B Remote Sandbox
 
