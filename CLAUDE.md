@@ -16,19 +16,48 @@ Reference implementation for KCD New York 2026 talk: "Platform Engineering for A
 - Kubernetes manifests: lowercase-hyphenated filenames (e.g., `cronjob.yaml`)
 - Shell scripts: `*.sh` with shebang `#!/bin/bash` and `set -e`
 - Each concept uses its own namespace matching the folder name (e.g., `02-claude-k8s-job`, `03-sidecar-proxy`)
-- Claude Code model: always use `--model` flag explicitly with `claude-haiku-4-5-20251001`
-- Claude Code mode: always use `--bare --dangerously-skip-permissions --print` flags (API key auth, no OAuth, non-interactive)
+- Secret name: `agent-credentials` in all namespaces (contains `ANTHROPIC_API_KEY` + `GH_TOKEN`)
+- Claude Code flags: `-p --dangerously-skip-permissions --verbose --output-format stream-json --model claude-haiku-4-5-20251001`
 - Never commit real credentials — use `REPLACE_ME` placeholders in manifests
 - Real credentials go in `.env` (gitignored), loaded via `source .env`
 
-## README Template (per concept)
+## Cluster Setup
 
-Each concept README follows: Concept Summary, Prerequisites, Step-by-Step, How to Verify, Expected Output, Cleanup
+`01-kind-cluster/scripts/create-cluster.sh` is idempotent:
+- Creates Kind cluster `claude-demo` (skips if exists)
+- Creates all concept namespaces
+- Creates/recreates `agent-credentials` secret in all namespaces from `.env`
+- Re-run anytime to refresh secrets after editing `.env`
+
+## Log Output
+
+All concepts use `stream-json` piped through `jq` for readable logs:
+
+```bash
+timeout 3600 claude $CLAUDE_ARGS -- "$PROMPT" \
+  | tee "$RAW_LOG" \
+  | jq --unbuffered -r '
+if .type == "assistant" then
+  .message.content[]? |
+  if .type == "text" then ">>> " + .text[0:5000]
+  elif .type == "tool_use" then "[" + .name + "] " + ((.input | tostring)[0:3000])
+  else empty end
+elif .type == "result" then
+  "[done] " + (.result // "complete")[0:5000]
+else empty end' || CLAUDE_EXIT=$?
+```
+
+Output format: `>>> ` (text), `[Bash] {...}` (tool calls), `[done] ...` (result).
 
 ## Prompts
 
 - Concepts 02-03: prompt delivered via inline env var (`PROMPT`)
 - Concepts 04-05: prompt stored in `prompts/*.md`, delivered via ConfigMap volume mount
+- Concepts 06-07: prompt inline in CR spec, rendered into ConfigMap by KRO
+
+## README Template (per concept)
+
+Each concept README follows: Concept Summary, Prerequisites, Step-by-Step, How to Verify, Expected Output, Cleanup
 
 ## Testing
 
@@ -36,8 +65,6 @@ Each concept README follows: Concept Summary, Prerequisites, Step-by-Step, How t
 - Target repo configured via `TESTING_REPO` env var in `.env`, injected into manifests via `envsubst`
 - Kind cluster name: `claude-demo`
 - Always test with haiku model for cost efficiency
-- ConfigMap names are distinct per agent: `reviewer-config` (04), `developer-config` (05)
-- KRO instances (06) generate their own configmaps based on instance name — no conflict
 
 ## envsubst Pattern
 
