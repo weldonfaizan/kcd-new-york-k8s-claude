@@ -50,6 +50,7 @@ kubectl create secret generic agent-credentials \
 ```
 
 ### 2. Apply the ConfigMap and run the Job
+The set command must be run from inside manifest folder.
 
 ```bash
 set -a && source ../../.env && set +a
