@@ -14,8 +14,8 @@ Reference implementation for KCD New York 2026 talk: "Platform Engineering for A
 ## Conventions
 
 - Kubernetes manifests: lowercase-hyphenated filenames (e.g., `cronjob.yaml`)
-- Shell scripts: `*.sh` with shebang `#!/bin/bash` and `set -euo pipefail`
-- All manifests use namespace `claude-demo`
+- Shell scripts: `*.sh` with shebang `#!/bin/bash` and `set -e`
+- Each concept uses its own namespace matching the folder name (e.g., `02-claude-k8s-job`, `03-sidecar-proxy`)
 - Claude Code model: always use `--model` flag explicitly with `claude-haiku-4-5-20251001`
 - Claude Code mode: always use `--bare --dangerously-skip-permissions --print` flags (API key auth, no OAuth, non-interactive)
 - Never commit real credentials — use `REPLACE_ME` placeholders in manifests
@@ -69,18 +69,18 @@ envsubst '$TESTING_REPO' < 04-code-reviewer/manifests/configmap.yaml | kubectl a
 envsubst '$TESTING_REPO' < 05-developer-agent/manifests/configmap.yaml | kubectl apply -f -
 
 # Run developer → wait → run reviewer → wait → repeat until merged
-kubectl delete job claude-developer -n claude-demo --ignore-not-found && sleep 5 && kubectl create -f 05-developer-agent/manifests/job.yaml
-kubectl wait --for=condition=complete job/claude-developer -n claude-demo --timeout=300s
+kubectl delete job claude-developer -n 05-developer-agent --ignore-not-found && sleep 5 && kubectl create -f 05-developer-agent/manifests/job.yaml
+kubectl wait --for=condition=complete job/claude-developer -n 05-developer-agent --timeout=300s
 
-kubectl delete job claude-reviewer -n claude-demo --ignore-not-found && sleep 3 && kubectl create -f 04-code-reviewer/manifests/job.yaml
-kubectl wait --for=condition=complete job/claude-reviewer -n claude-demo --timeout=300s
+kubectl delete job claude-reviewer -n 04-code-reviewer --ignore-not-found && sleep 3 && kubectl create -f 04-code-reviewer/manifests/job.yaml
+kubectl wait --for=condition=complete job/claude-reviewer -n 04-code-reviewer --timeout=300s
 ```
 
 To restrict the developer to only address existing PRs (no new features), patch AGENT_TASK:
 
 ```bash
-kubectl patch configmap developer-config -n claude-demo --type merge \
+kubectl patch configmap developer-config -n 05-developer-agent --type merge \
   -p '{"data":{"AGENT_TASK":"ONLY address review feedback on existing open PRs. Do NOT create new features or PRs."}}'
 ```
 
-Reset after: `kubectl patch configmap developer-config -n claude-demo --type merge -p '{"data":{"AGENT_TASK":""}}'`
+Reset after: `kubectl patch configmap developer-config -n 05-developer-agent --type merge -p '{"data":{"AGENT_TASK":""}}'`

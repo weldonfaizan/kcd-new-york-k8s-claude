@@ -31,7 +31,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: claude-hello
-  namespace: claude-demo
+  namespace: 02-claude-k8s-job
 spec:
   backoffLimit: 0          # Don't retry on failure — Claude is not idempotent
   template:
@@ -66,7 +66,7 @@ spec:
           # The Secret holds ANTHROPIC_API_KEY, which Claude Code reads automatically.
           envFrom:
             - secretRef:
-                name: anthropic-credentials
+                name: agent-credentials
 
           resources:          # Always set limits on agent workloads
             requests:
@@ -129,7 +129,7 @@ The API key comes from a Kubernetes Secret mounted via `envFrom`:
 ```yaml
     envFrom:
       - secretRef:
-          name: anthropic-credentials   # holds ANTHROPIC_API_KEY
+          name: agent-credentials   # holds ANTHROPIC_API_KEY
 ```
 
 > This inline-prompt pattern works for simple one-liners. Concepts 04 and 05 move to longer prompts stored in `prompts/*.md` files, delivered via ConfigMap volume mounts.
@@ -150,9 +150,9 @@ bash scripts/build-and-load.sh
 ### 2. Create the Secret from your .env
 
 ```bash
-kubectl create secret generic anthropic-credentials \
+kubectl create secret generic agent-credentials \
   --from-env-file=../../.env \
-  -n claude-demo
+  -n 02-claude-k8s-job
 ```
 
 ### 3. Run the Job
@@ -164,13 +164,13 @@ kubectl apply -f manifests/job.yaml
 ### 4. Watch the output
 
 ```bash
-kubectl logs -f job/claude-hello -n claude-demo
+kubectl logs -f job/claude-hello -n 02-claude-k8s-job
 ```
 
 The output is stream-json. To extract just the final result:
 
 ```bash
-kubectl logs job/claude-hello -n claude-demo | grep '"type":"result"' | jq -r '.result'
+kubectl logs job/claude-hello -n 02-claude-k8s-job | grep '"type":"result"' | jq -r '.result'
 ```
 
 ## How to Verify
@@ -195,5 +195,5 @@ See [03-sidecar-proxy](../03-sidecar-proxy/) for the secure pattern.
 
 ```bash
 kubectl delete -f manifests/job.yaml
-kubectl delete secret anthropic-credentials -n claude-demo
+kubectl delete secret agent-credentials -n 02-claude-k8s-job
 ```

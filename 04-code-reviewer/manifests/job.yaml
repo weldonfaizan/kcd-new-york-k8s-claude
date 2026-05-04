@@ -2,7 +2,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: claude-reviewer
-  namespace: claude-demo
+  namespace: 04-code-reviewer
 spec:
   backoffLimit: 0
   template:

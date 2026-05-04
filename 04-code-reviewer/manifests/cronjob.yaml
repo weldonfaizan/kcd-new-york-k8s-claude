@@ -2,7 +2,7 @@ apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: claude-reviewer
-  namespace: claude-demo
+  namespace: 04-code-reviewer
 spec:
   schedule: "0 */4 * * *"
   concurrencyPolicy: Forbid

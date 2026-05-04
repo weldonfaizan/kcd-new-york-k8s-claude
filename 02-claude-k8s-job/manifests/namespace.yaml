@@ -1,4 +1,4 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: claude-demo
+  name: 02-claude-k8s-job

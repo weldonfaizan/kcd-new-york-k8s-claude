@@ -89,7 +89,19 @@ The MCP server checks each command against a configurable whitelist (`allowedLoc
 
 ## Step-by-Step
 
-### 1. Rebuild the Claude Code image
+### 1. Create the namespace and secret
+
+```bash
+kubectl create namespace 07-sandbox 2>/dev/null || true
+
+set -a && source .env && set +a
+kubectl create secret generic agent-credentials \
+  --from-literal=ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY \
+  --from-literal=GH_TOKEN=$GH_TOKEN \
+  -n 07-sandbox
+```
+
+### 2. Rebuild the Claude Code image
 
 Concept 07 requires additional Python packages (FastMCP, FastAPI, uvicorn, requests) and `jq`:
 
@@ -100,7 +112,7 @@ kind load docker-image claude-code:latest --name claude-demo
 cd ..
 ```
 
-### 2. Install agent-sandbox controller
+### 3. Install agent-sandbox controller
 
 ```bash
 export VERSION="v0.4.3"
@@ -114,7 +126,7 @@ Verify:
 kubectl get crd sandboxes.agents.x-k8s.io
 ```
 
-### 3. Apply the RGD
+### 4. Apply the RGD
 
 ```bash
 kubectl apply -f 07-sandbox/agent-sandbox/manifests/rgd.yaml
@@ -126,7 +138,7 @@ Verify the CRD was created:
 kubectl get crd claudecodeagentsandboxes.kro.run
 ```
 
-### 4. Run the standalone smoke test
+### 5. Run the standalone smoke test
 
 The test instance runs in **sandbox-only mode** (no schedule) — Claude Code runs directly inside the Sandbox with full Bash access:
 
@@ -138,13 +150,13 @@ Wait for the Sandbox pod to complete (note: no Job — the Sandbox pod runs Clau
 
 ```bash
 kubectl wait --for=jsonpath='{.status.phase}'=Succeeded \
-  pod -l agents.x-k8s.io/sandbox-name-hash -n claude-demo --timeout=180s
+  pod -l agents.x-k8s.io/sandbox-name-hash -n 07-sandbox --timeout=180s
 ```
 
 View the logs:
 
 ```bash
-kubectl logs sandbox-test-sandbox -c claude-code -n claude-demo --tail=-1
+kubectl logs sandbox-test-sandbox -c claude-code -n 07-sandbox --tail=-1
 ```
 
 #### Expected Output
@@ -211,10 +223,10 @@ Notice: in sandbox-only mode, Claude uses the **`[Bash]`** tool directly (not `[
 #### Cleanup the Standalone Test
 
 ```bash
-kubectl delete claudecodeagentsandbox sandbox-test -n claude-demo
+kubectl delete claudecodeagentsandbox sandbox-test -n 07-sandbox
 ```
 
-### 5. Run the CronJob + execution sandbox smoke test
+### 6. Run the CronJob + execution sandbox smoke test
 
 This test runs in **CronJob mode** (with schedule) — Claude Code runs in a CronJob pod with Bash disabled, routing commands through an MCP server to a separate Sandbox execution backend:
 
@@ -225,7 +237,7 @@ kubectl apply -f 07-sandbox/agent-sandbox/manifests/test-cronjob.yaml
 Verify the resources were created:
 
 ```bash
-kubectl get claudecodeagentsandbox,sandbox,cronjob,pvc -n claude-demo
+kubectl get claudecodeagentsandbox,sandbox,cronjob,pvc -n 07-sandbox
 ```
 
 You should see:
@@ -237,19 +249,19 @@ You should see:
 To trigger a run immediately (instead of waiting for the cron schedule):
 
 ```bash
-kubectl create job sandbox-test-cron-manual --from=cronjob/sandbox-test-cron -n claude-demo
+kubectl create job sandbox-test-cron-manual --from=cronjob/sandbox-test-cron -n 07-sandbox
 ```
 
 Wait for the job to complete:
 
 ```bash
-kubectl wait --for=condition=complete job/sandbox-test-cron-manual -n claude-demo --timeout=180s
+kubectl wait --for=condition=complete job/sandbox-test-cron-manual -n 07-sandbox --timeout=180s
 ```
 
 View the logs:
 
 ```bash
-kubectl logs job/sandbox-test-cron-manual -c claude-code -n claude-demo --tail=-1
+kubectl logs job/sandbox-test-cron-manual -c claude-code -n 07-sandbox --tail=-1
 ```
 
 #### Expected Output (CronJob Mode)
@@ -259,7 +271,7 @@ Starting Sandbox CronJob Tester...
 Target repo: none
 Model: claude-haiku-4-5-20251001
 Mode: cronjob (MCP sandbox routing)
-Sandbox: http://sandbox-test-cron-sandbox.claude-demo.svc.cluster.local:8888
+Sandbox: http://sandbox-test-cron-sandbox.07-sandbox.svc.cluster.local:8888
 Allowed local: git,gh
 ---
 >>> I'll run through all the CronJob sandbox tests.
@@ -289,11 +301,11 @@ Notice: in CronJob mode, Claude uses **`[mcp__sandbox__sandbox_execute]`** inste
 #### Cleanup the CronJob Test
 
 ```bash
-kubectl delete claudecodeagentsandbox sandbox-test-cron -n claude-demo
-kubectl delete job sandbox-test-cron-manual -n claude-demo --ignore-not-found
+kubectl delete claudecodeagentsandbox sandbox-test-cron -n 07-sandbox
+kubectl delete job sandbox-test-cron-manual -n 07-sandbox --ignore-not-found
 ```
 
-### 6. Deploy the developer agent (sandbox-only)
+### 7. Deploy the developer agent (sandbox-only)
 
 One-shot agent that runs directly inside a Sandbox (no schedule):
 
@@ -302,10 +314,10 @@ set -a && source .env && set +a
 envsubst '$TESTING_REPO' < 07-sandbox/agent-sandbox/manifests/developer-instance.yaml | kubectl apply -f -
 ```
 
-### 7. Verify resources
+### 8. Verify resources
 
 ```bash
-kubectl get claudecodeagentsandbox,sandbox,configmap,pvc,pod -n claude-demo
+kubectl get claudecodeagentsandbox,sandbox,configmap,pvc,pod -n 07-sandbox
 ```
 
 You should see:
@@ -315,10 +327,10 @@ You should see:
 - One pod (sandbox with proxy sidecar + claude-code)
 - **No Job or CronJob** (sandbox-only mode)
 
-### 8. Watch the agent work
+### 9. Watch the agent work
 
 ```bash
-kubectl logs -f claude-developer-sandbox -c claude-code -n claude-demo
+kubectl logs -f claude-developer-sandbox -c claude-code -n 07-sandbox
 ```
 
 You should see:
@@ -327,7 +339,7 @@ You should see:
 3. `[Bash]` tool calls — all commands run directly in the sandbox
 4. `[done]` with the final result
 
-### 9. (Optional) Deploy the reviewer agent with a schedule
+### 10. (Optional) Deploy the reviewer agent with a schedule
 
 Add a `schedule` field to enable CronJob mode with sandbox execution backend:
 
@@ -341,7 +353,7 @@ In CronJob mode, you'll see:
 - Two standalone PVCs (persist workspace and memory across CronJob runs)
 - `[mcp__sandbox__sandbox_execute]` tool calls instead of `[Bash]`
 
-### 10. (Optional) Customize the whitelist (CronJob mode)
+### 11. (Optional) Customize the whitelist (CronJob mode)
 
 To allow additional commands to run locally in the CronJob pod (e.g., `curl`):
 
@@ -357,8 +369,8 @@ The `allowedLocalCommands` field is ignored in sandbox-only mode (all commands r
 
 ```bash
 # Delete agent instances
-kubectl delete claudecodeagentsandbox claude-developer claude-reviewer sandbox-test sandbox-test-cron -n claude-demo --ignore-not-found
-kubectl delete job sandbox-test-cron-manual -n claude-demo --ignore-not-found
+kubectl delete claudecodeagentsandbox claude-developer claude-reviewer sandbox-test sandbox-test-cron -n 07-sandbox --ignore-not-found
+kubectl delete job sandbox-test-cron-manual -n 07-sandbox --ignore-not-found
 
 # Delete the RGD
 kubectl delete -f 07-sandbox/agent-sandbox/manifests/rgd.yaml
