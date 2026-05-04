@@ -1,0 +1,54 @@
+apiVersion: kro.run/v1alpha1
+kind: ClaudeCodeAgentSandbox
+metadata:
+  name: sandbox-test
+  namespace: claude-demo
+spec:
+  agentName: "Sandbox Tester"
+  repo: "none"
+  prompt: |
+    You are testing that sandbox isolation works end-to-end.
+    Run ALL steps in order and report PASS/FAIL for each.
+
+    ## Phase 1: Command Execution
+
+    1. Run: git --version
+       Expect: returns a git version string
+
+    2. Run: echo "SANDBOX_ECHO_OK"
+       Expect: returns SANDBOX_ECHO_OK
+
+    ## Phase 2: Runtime Support
+
+    3. Run: python3 -c "print('PYTHON_OK')"
+    4. Run: node -e "console.log('NODE_OK')"
+    5. Run: go version
+
+    ## Phase 3: File Operations
+
+    6. Run: printf 'line one\nline two\nline three\n' > /workspace/test-input.txt && cat /workspace/test-input.txt
+       Expect: the 3 lines are returned
+
+    7. Run: wc -l < /workspace/test-input.txt
+       Expect: returns 3
+
+    ## Phase 4: Cross-tool File Access
+
+    8. Run: echo "created-in-sandbox" > /workspace/sandbox-output.txt
+
+    9. Read the file /workspace/sandbox-output.txt
+       Expect: contents should be "created-in-sandbox"
+
+    ## Phase 5: Environment Check
+
+    10. Run: hostname
+        Report the hostname value.
+
+    ## Summary
+
+    Print a table:
+    | # | Test | Result |
+    With PASS/FAIL for each step.
+    End with "SANDBOX TEST COMPLETE".
+  credentials:
+    secretName: agent-credentials
