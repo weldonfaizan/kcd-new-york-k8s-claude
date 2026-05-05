@@ -1,0 +1,144 @@
+# ClaudeCodeAgentSandboxRunner (internal executor)
+# Creates a single Sandbox CR that runs Claude Code with full Bash access.
+# PVCs are passed by name (not created here) so they survive Runner deletion.
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: claudecodeagentsandboxrunner
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: ClaudeCodeAgentSandboxRunner
+
+    spec:
+      agentName: string | required=true description="Display name for the agent (used in git commits)"
+      agentEmail: string | default="claude-agent@bot.local" description="Git email for the agent"
+      model: string | default="claude-haiku-4-5-20251001" description="Claude model to use"
+      repo: string | required=true description="GitHub repository (owner/repo)"
+      task: string | default="" description="Optional task description passed as AGENT_TASK env var"
+      prompt: string | required=true description="Full agent prompt (mounted at /prompts/prompt.md)"
+      sessionResume: boolean | default=false description="Enable session resume across runs"
+      workspacePvcName: string | required=true description="Name of PVC for workspace"
+      memoryPvcName: string | required=true description="Name of PVC for Claude memory"
+      configMapName: string | required=true description="Name of ConfigMap with entrypoint scripts"
+      credentials:
+        secretName: string | required=true description="Name of the Secret containing ANTHROPIC_API_KEY and GH_TOKEN"
+
+    status:
+      sandboxName: ${runnerSandbox.metadata.name}
+
+  resources:
+
+    - id: runnerSandbox
+      template:
+        apiVersion: agents.x-k8s.io/v1alpha1
+        kind: Sandbox
+        metadata:
+          name: ${schema.metadata.name}-sandbox
+          namespace: ${schema.metadata.namespace}
+        spec:
+          podTemplate:
+            spec:
+              restartPolicy: Never
+              volumes:
+                - name: workspace
+                  persistentVolumeClaim:
+                    claimName: ${schema.spec.workspacePvcName}
+                - name: claude-memory
+                  persistentVolumeClaim:
+                    claimName: ${schema.spec.memoryPvcName}
+                - name: scripts
+                  configMap:
+                    name: ${schema.spec.configMapName}
+                    items:
+                      - key: entrypoint.sh
+                        path: entrypoint.sh
+                        mode: 0755
+                - name: prompt
+                  configMap:
+                    name: ${schema.spec.configMapName}
+                    items:
+                      - key: agent-prompt
+                        path: prompt.md
+                - name: proxy-certs
+                  emptyDir: {}
+
+              initContainers:
+                - name: proxy-sidecar
+                  image: credential-proxy:latest
+                  imagePullPolicy: Never
+                  restartPolicy: Always
+                  env:
+                    - name: ANTHROPIC_API_KEY
+                      valueFrom:
+                        secretKeyRef:
+                          name: ${schema.spec.credentials.secretName}
+                          key: ANTHROPIC_API_KEY
+                    - name: GH_TOKEN
+                      valueFrom:
+                        secretKeyRef:
+                          name: ${schema.spec.credentials.secretName}
+                          key: GH_TOKEN
+                  volumeMounts:
+                    - name: proxy-certs
+                      mountPath: /certs
+                  ports:
+                    - containerPort: 8080
+                      protocol: TCP
+                  startupProbe:
+                    exec:
+                      command: ["test", "-f", "/certs/proxy-ca.crt"]
+                    initialDelaySeconds: 1
+                    periodSeconds: 1
+                    failureThreshold: 10
+                  resources:
+                    requests:
+                      memory: "64Mi"
+                      cpu: "50m"
+                    limits:
+                      memory: "128Mi"
+                      cpu: "100m"
+
+              containers:
+                - name: claude-code
+                  image: claude-code:latest
+                  imagePullPolicy: Never
+                  command: ["/bin/bash", "/scripts/entrypoint.sh"]
+                  env:
+                    - name: ANTHROPIC_API_KEY
+                      value: "FAKE_KEY_REPLACED_BY_PROXY"
+                    - name: ANTHROPIC_BASE_URL
+                      value: "http://localhost:8080"
+                    - name: GH_TOKEN
+                      value: "FAKE_GH_TOKEN_REPLACED_BY_PROXY"
+                    - name: TARGET_REPO
+                      value: ${schema.spec.repo}
+                    - name: ANTHROPIC_MODEL
+                      value: ${schema.spec.model}
+                    - name: AGENT_GIT_EMAIL
+                      value: ${schema.spec.agentEmail}
+                    - name: AGENT_GIT_NAME
+                      value: ${schema.spec.agentName}
+                    - name: ENABLE_SESSION_RESUME
+                      value: '${schema.spec.sessionResume ? "true" : ""}'
+                    - name: AGENT_TASK
+                      value: ${schema.spec.task}
+                  volumeMounts:
+                    - name: workspace
+                      mountPath: /workspace
+                    - name: claude-memory
+                      mountPath: /home/claude/.claude
+                    - name: scripts
+                      mountPath: /scripts
+                    - name: prompt
+                      mountPath: /prompts
+                    - name: proxy-certs
+                      mountPath: /certs
+                      readOnly: true
+                  resources:
+                    requests:
+                      memory: "512Mi"
+                      cpu: "200m"
+                    limits:
+                      memory: "1Gi"
+                      cpu: "1000m"

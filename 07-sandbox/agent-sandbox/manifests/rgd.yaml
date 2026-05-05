@@ -1,3 +1,6 @@
+# ClaudeCodeAgentSandbox (user-facing orchestrator)
+# Standalone mode: creates a Runner directly.
+# CronJob mode: creates a CronJob that uses kubectl to create/wait/delete Runners.
 apiVersion: kro.run/v1alpha1
 kind: ResourceGraphDefinition
 metadata:
@@ -14,9 +17,8 @@ spec:
       repo: string | required=true description="GitHub repository (owner/repo)"
       task: string | default="" description="Optional task description passed as AGENT_TASK env var"
       prompt: string | required=true description="Full agent prompt (mounted at /prompts/prompt.md)"
-      schedule: string | default="" description="Cron schedule (empty = one-shot Sandbox, cron = CronJob + Sandbox execution backend)"
+      schedule: string | default="" description="Cron schedule (empty = one-shot Sandbox, set = CronJob orchestrator)"
       sessionResume: boolean | default=false description="Enable session resume across runs"
-      allowedLocalCommands: string | default="git,gh" description="Comma-separated commands that run locally in CronJob mode (ignored in Sandbox-only mode)"
       credentials:
         secretName: string | required=true description="Name of the Secret containing ANTHROPIC_API_KEY and GH_TOKEN"
 
@@ -25,7 +27,7 @@ spec:
 
   resources:
 
-    # --- 1. ConfigMap: agent configuration, scripts, and prompt ---
+    # --- 1. ConfigMap: entrypoint scripts and prompt ---
     - id: agentConfig
       template:
         apiVersion: v1
@@ -34,17 +36,8 @@ spec:
           name: ${schema.metadata.name}-config
           namespace: ${schema.metadata.namespace}
         data:
-          TARGET_REPO: ${schema.spec.repo}
-          ANTHROPIC_MODEL: ${schema.spec.model}
-          AGENT_GIT_EMAIL: ${schema.spec.agentEmail}
-          AGENT_GIT_NAME: ${schema.spec.agentName}
-          ENABLE_SESSION_RESUME: '${schema.spec.sessionResume ? "true" : ""}'
-          AGENT_TASK: ${schema.spec.task}
-          SANDBOX_URL: http://${schema.metadata.name}-sandbox.${schema.metadata.namespace}.svc.cluster.local:8888
-          ALLOWED_LOCAL_COMMANDS: ${schema.spec.allowedLocalCommands}
-
-          # --- Sandbox-only entrypoint: runs Claude Code with full Bash (the sandbox IS the isolation) ---
-          standalone-entrypoint.sh: |
+          # --- Entrypoint: runs Claude Code with full Bash (used inside Sandbox) ---
+          entrypoint.sh: |
             #!/bin/bash
             set -e
 
@@ -122,336 +115,85 @@ spec:
 
             echo "=== Complete (exit: $CLAUDE_EXIT) ==="
 
-          # --- CronJob entrypoint: waits for sandbox, runs Claude Code with MCP routing ---
-          cronjob-entrypoint.sh: |
+          # --- Orchestrator entrypoint: creates a Runner, waits, streams logs, cleans up ---
+          orchestrator-entrypoint.sh: |
             #!/bin/bash
             set -e
+            RUNNER_NAME="${"${PARENT_NAME}"}-run-$(date +%s)"
+            SANDBOX_NAME="${"${RUNNER_NAME}"}-sandbox"
 
-            git config --global user.email "${"${AGENT_GIT_EMAIL:-claude-agent@bot.local}"}"
-            git config --global user.name "${"${AGENT_GIT_NAME:-Claude Agent}"}"
-
-            # Route only git and gh through the credential proxy (not all HTTPS traffic)
-            if [ -f /certs/combined-ca.crt ]; then
-              git config --global http.proxy http://127.0.0.1:8080
-              git config --global http.sslCAInfo /certs/combined-ca.crt
-              mkdir -p "$HOME/bin"
-              cat > "$HOME/bin/gh" << 'GHWRAPPER'
-            #!/bin/bash
-            exec env HTTPS_PROXY=http://127.0.0.1:8080 SSL_CERT_FILE=/certs/combined-ca.crt /usr/bin/gh "$@"
-            GHWRAPPER
-              chmod +x "$HOME/bin/gh"
-              export PATH="$HOME/bin:$PATH"
+            # Clean up any stale Runners from previous failed runs
+            EXISTING=$(kubectl get claudecodeagentsandboxrunner -n ${"${NAMESPACE}"} -l orchestrator=${"${PARENT_NAME}"} -o name 2>/dev/null || true)
+            if [ -n "${"${EXISTING}"}" ]; then
+              echo "Cleaning up stale runners: ${"${EXISTING}"}"
+              kubectl delete claudecodeagentsandboxrunner -n ${"${NAMESPACE}"} -l orchestrator=${"${PARENT_NAME}"} --timeout=60s || true
+              sleep 5
             fi
 
-            # Wait for sandbox to be ready
-            echo "Waiting for sandbox at ${"${SANDBOX_URL}"}..."
-            until curl -sf ${"${SANDBOX_URL}"}/ > /dev/null 2>&1; do
-              sleep 2
-            done
-            echo "Sandbox ready."
+            # Get parent CR UID for ownerReference (ensures GC on parent deletion)
+            PARENT_UID=$(kubectl get claudecodeagentsandbox ${"${PARENT_NAME}"} -n ${"${NAMESPACE}"} -o jsonpath='{.metadata.uid}')
 
-            # Build prompt: inject env vars as context, then append the prompt file
-            PROMPT="TARGET_REPO=${"${TARGET_REPO}"}"
-            [ -n "${"${AGENT_TASK:-}"}" ] && PROMPT="${"${PROMPT}"}
-            AGENT_TASK=${"${AGENT_TASK:-}"}"
-            PROMPT="${"${PROMPT}"}
+            echo "Creating Runner: ${"${RUNNER_NAME}"}"
 
-            $(cat /prompts/prompt.md)"
+            cat <<EOF | kubectl apply -f -
+            apiVersion: kro.run/v1alpha1
+            kind: ClaudeCodeAgentSandboxRunner
+            metadata:
+              name: ${"${RUNNER_NAME}"}
+              namespace: ${"${NAMESPACE}"}
+              labels:
+                orchestrator: ${"${PARENT_NAME}"}
+              ownerReferences:
+                - apiVersion: kro.run/v1alpha1
+                  kind: ClaudeCodeAgentSandbox
+                  name: ${"${PARENT_NAME}"}
+                  uid: ${"${PARENT_UID}"}
+                  controller: false
+                  blockOwnerDeletion: false
+            spec:
+              agentName: "${"${AGENT_GIT_NAME}"}"
+              agentEmail: "${"${AGENT_GIT_EMAIL}"}"
+              model: "${"${ANTHROPIC_MODEL}"}"
+              repo: "${"${TARGET_REPO}"}"
+              task: "${"${AGENT_TASK}"}"
+              prompt: |
+            $(sed 's/^/    /' /prompts/prompt.md)
+              sessionResume: ${"${ENABLE_SESSION_RESUME:-false}"}
+              workspacePvcName: "${"${WORKSPACE_PVC_NAME}"}"
+              memoryPvcName: "${"${MEMORY_PVC_NAME}"}"
+              configMapName: "${"${CONFIG_MAP_NAME}"}"
+              credentials:
+                secretName: "${"${CREDENTIALS_SECRET_NAME}"}"
+            EOF
 
-            echo "Starting ${"${AGENT_GIT_NAME:-Claude Agent}"}..."
-            echo "Target repo: ${"${TARGET_REPO}"}"
-            [ -n "${"${AGENT_TASK:-}"}" ] && echo "Task: ${"${AGENT_TASK}"}"
-            echo "Model: ${"${ANTHROPIC_MODEL}"}"
-            echo "Mode: cronjob (MCP sandbox routing)"
-            echo "Sandbox: ${"${SANDBOX_URL}"}"
-            echo "Allowed local: ${"${ALLOWED_LOCAL_COMMANDS}"}"
-            echo "---"
+            # Wait for sandbox pod to be running before attaching logs
+            echo "Waiting for sandbox ${"${SANDBOX_NAME}"} to start..."
+            kubectl wait --for=condition=Ready sandbox/${"${SANDBOX_NAME}"} -n ${"${NAMESPACE}"} --timeout=120s || {
+              echo "Sandbox failed to start, cleaning up..."
+              kubectl delete claudecodeagentsandboxrunner ${"${RUNNER_NAME}"} -n ${"${NAMESPACE}"} --timeout=60s || true
+              exit 1
+            }
 
-            # Claude Code with Bash disabled — commands routed via MCP to sandbox
-            CLAUDE_ARGS="-p --dangerously-skip-permissions --verbose --output-format stream-json --model ${"${ANTHROPIC_MODEL}"} --disallowedTools Bash --mcp-config /mcp/config.json"
+            # Stream logs in background (attached while pod is alive — captures everything)
+            echo "=== Runner logs ==="
+            kubectl logs -f ${"${SANDBOX_NAME}"} -c claude-code -n ${"${NAMESPACE}"} &
+            LOGS_PID=$!
 
-            # Session resume (opt-in via ENABLE_SESSION_RESUME=true)
-            if [ "${"${ENABLE_SESSION_RESUME:-}"}" = "true" ]; then
-              PREV_RUN_FLAG="/home/claude/.claude/.agent-ran"
-              if [ -f "$PREV_RUN_FLAG" ]; then
-                echo "Previous session found — resuming with --continue"
-                CLAUDE_ARGS="$CLAUDE_ARGS --continue"
-              else
-                echo "First run — starting fresh session"
-              fi
-            fi
+            # Wait for sandbox to finish
+            kubectl wait --for=condition=Finished sandbox/${"${SANDBOX_NAME}"} -n ${"${NAMESPACE}"} --timeout=3600s || true
 
-            RAW_LOG="/tmp/claude-raw-$(date +%s).jsonl"
-            CLAUDE_EXIT=0
+            # Wait for log stream to flush (exits when container terminates)
+            wait ${"${LOGS_PID}"} 2>/dev/null || true
 
-            timeout 3600 claude $CLAUDE_ARGS -- "$PROMPT" \
-              | tee "$RAW_LOG" \
-              | jq --unbuffered -r '
-            if .type == "assistant" then
-              .message.content[]? |
-              if .type == "text" then ">>> " + .text[0:5000]
-              elif .type == "tool_use" then "[" + .name + "] " + ((.input | tostring)[0:3000])
-              else empty end
-            elif .type == "result" then
-              "[done] " + (.result // "complete")[0:5000]
-            else empty end' || CLAUDE_EXIT=$?
-
-            # Mark session for resume on next run
-            if [ "${"${ENABLE_SESSION_RESUME:-}"}" = "true" ] && [ "$CLAUDE_EXIT" -eq 0 ]; then
-              touch "/home/claude/.claude/.agent-ran"
-            fi
-
-            # If Claude timed out, salvage partial results
-            if [ "$CLAUDE_EXIT" -eq 124 ]; then
-              echo "=== TIMEOUT: Claude exceeded time limit ==="
-              timeout 300 claude -p --dangerously-skip-permissions -- \
-                "The previous process timed out. Check what partial results exist and write a summary to /tmp/partial-report.md."
-            fi
-
-            echo "=== Complete (exit: $CLAUDE_EXIT) ==="
-
-          # --- Sandbox runtime entrypoint: configures git and starts the SDK-compatible API ---
-          sandbox-runtime-entrypoint.sh: |
-            #!/bin/bash
-            set -euo pipefail
-
-            git config --global user.email "${"${AGENT_GIT_EMAIL:-claude-agent@bot.local}"}"
-            git config --global user.name "${"${AGENT_GIT_NAME:-Claude Agent}"}"
-
-            echo "Starting sandbox runtime on :8888..."
-            exec python3 -m uvicorn sandbox_runtime:app --host 0.0.0.0 --port 8888 --log-level info
-
-          # --- Sandbox runtime: SDK-compatible FastAPI server (execute, upload, download, list, exists) ---
-          sandbox_runtime.py: |
-            """Agent-sandbox SDK-compatible runtime API.
-
-            Implements the same HTTP endpoints as the official python-runtime-sandbox
-            from kubernetes-sigs/agent-sandbox, so the Python SDK's CommandExecutor
-            and Filesystem classes work against this server without changes.
-            """
-            import os, shlex, subprocess, urllib.parse
-            from fastapi import FastAPI, UploadFile, File
-            from fastapi.responses import FileResponse, JSONResponse
-            from pydantic import BaseModel
-
-            WORKSPACE = os.environ.get("SANDBOX_WORKSPACE", "/workspace")
-            os.makedirs(WORKSPACE, exist_ok=True)
-
-            def get_safe_path(file_path: str) -> str:
-                base_dir = os.path.realpath(WORKSPACE)
-                clean_path = file_path.lstrip("/")
-                full_path = os.path.realpath(os.path.join(base_dir, clean_path))
-                if os.path.commonpath([base_dir, full_path]) != base_dir:
-                    raise ValueError("Access denied: path must be within workspace")
-                return full_path
-
-            class ExecuteRequest(BaseModel):
-                command: str
-
-            class ExecuteResponse(BaseModel):
-                stdout: str = ""
-                stderr: str = ""
-                exit_code: int = -1
-
-            app = FastAPI(title="Sandbox Runtime")
-
-            @app.get("/")
-            async def health():
-                return {"status": "ok"}
-
-            @app.post("/execute", response_model=ExecuteResponse)
-            async def execute(req: ExecuteRequest):
-                try:
-                    proc = subprocess.run(
-                        req.command, shell=True, capture_output=True, text=True,
-                        timeout=300, cwd=WORKSPACE,
-                    )
-                    return ExecuteResponse(stdout=proc.stdout, stderr=proc.stderr, exit_code=proc.returncode)
-                except subprocess.TimeoutExpired:
-                    return ExecuteResponse(stderr="[timeout after 300s]", exit_code=124)
-                except Exception as e:
-                    return ExecuteResponse(stderr=str(e), exit_code=1)
-
-            @app.post("/upload")
-            async def upload(file: UploadFile = File(...)):
-                dest = os.path.join(WORKSPACE, file.filename)
-                os.makedirs(os.path.dirname(dest), exist_ok=True)
-                with open(dest, "wb") as f:
-                    f.write(await file.read())
-                return {"message": f"uploaded {file.filename}"}
-
-            @app.get("/download/{path:path}")
-            async def download(path: str):
-                decoded = urllib.parse.unquote(path)
-                try:
-                    full = get_safe_path(decoded)
-                except ValueError:
-                    return JSONResponse(status_code=403, content={"message": "access denied"})
-                if os.path.isfile(full):
-                    return FileResponse(full, media_type="application/octet-stream")
-                return JSONResponse(status_code=404, content={"message": "not found"})
-
-            @app.get("/list/{path:path}")
-            async def list_files(path: str):
-                decoded = urllib.parse.unquote(path)
-                try:
-                    full = get_safe_path(decoded)
-                except ValueError:
-                    return JSONResponse(status_code=403, content={"message": "access denied"})
-                if not os.path.isdir(full):
-                    return JSONResponse(status_code=404, content={"message": "not a directory"})
-                entries = []
-                with os.scandir(full) as it:
-                    for e in it:
-                        s = e.stat()
-                        entries.append({"name": e.name, "size": s.st_size,
-                                        "type": "directory" if e.is_dir() else "file",
-                                        "mod_time": s.st_mtime})
-                return JSONResponse(content=entries)
-
-            @app.get("/exists/{path:path}")
-            async def exists(path: str):
-                decoded = urllib.parse.unquote(path)
-                try:
-                    full = get_safe_path(decoded)
-                except ValueError:
-                    return JSONResponse(status_code=403, content={"message": "access denied"})
-                return {"path": decoded, "exists": os.path.exists(full)}
-
-          # --- MCP server: smart routing — local for git/gh, sandbox for everything else ---
-          mcp-server.py: |
-            """MCP server that routes commands between local execution and sandbox.
-
-            Whitelisted commands (git, gh, etc.) run locally in the CronJob pod.
-            Everything else is forwarded to the sandbox via the agent-sandbox
-            SDK-compatible HTTP API, with automatic file sync.
-
-            Compatible with the k8s-agent-sandbox Python SDK — uses the same
-            HTTP endpoints (execute, upload, download, list, exists).
-            """
-            import io, json, os, shlex, subprocess, tarfile
-            import requests
-            from fastmcp import FastMCP
-
-            SANDBOX_URL = os.environ.get("SANDBOX_URL", "http://localhost:8888")
-            ALLOWED = [c.strip() for c in os.environ.get("ALLOWED_LOCAL_COMMANDS", "git,gh").split(",") if c.strip()]
-            WORKSPACE = "/workspace"
-
-            mcp = FastMCP("sandbox")
-            _synced = False
-
-            def _is_local(command: str) -> bool:
-                """Check if the command starts with a whitelisted prefix."""
-                try:
-                    first = shlex.split(command)[0]
-                except (ValueError, IndexError):
-                    return False
-                base = os.path.basename(first)
-                return base in ALLOWED
-
-            def _sync_to_sandbox():
-                """Upload the local workspace to the sandbox via tar + upload + extract."""
-                global _synced
-                if not os.path.isdir(WORKSPACE):
-                    return
-                # Create tar of workspace (excluding .git internals for speed)
-                buf = io.BytesIO()
-                with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-                    for entry in os.scandir(WORKSPACE):
-                        tar.add(entry.path, arcname=entry.name)
-                buf.seek(0)
-                # Upload tar to sandbox
-                requests.post(
-                    f"{SANDBOX_URL}/upload",
-                    files={"file": ("_sync.tar.gz", buf, "application/gzip")},
-                    timeout=60,
-                )
-                # Extract in sandbox
-                requests.post(
-                    f"{SANDBOX_URL}/execute",
-                    json={"command": f"tar xzf {WORKSPACE}/_sync.tar.gz -C {WORKSPACE} && rm -f {WORKSPACE}/_sync.tar.gz"},
-                    timeout=60,
-                )
-                _synced = True
-
-            def _sync_from_sandbox():
-                """Download changed files from sandbox back to local workspace."""
-                # Create tar in sandbox
-                resp = requests.post(
-                    f"{SANDBOX_URL}/execute",
-                    json={"command": f"tar czf /tmp/_syncback.tar.gz -C {WORKSPACE} . 2>/dev/null; mv /tmp/_syncback.tar.gz {WORKSPACE}/_syncback.tar.gz"},
-                    timeout=60,
-                )
-                # Download tar
-                resp = requests.get(f"{SANDBOX_URL}/download/_syncback.tar.gz", timeout=60)
-                if resp.status_code == 200:
-                    buf = io.BytesIO(resp.content)
-                    with tarfile.open(fileobj=buf, mode="r:gz") as tar:
-                        tar.extractall(path=WORKSPACE)
-                # Cleanup
-                requests.post(
-                    f"{SANDBOX_URL}/execute",
-                    json={"command": f"rm -f {WORKSPACE}/_syncback.tar.gz"},
-                    timeout=10,
-                )
-
-            def _run_local(command: str) -> str:
-                """Execute a command locally."""
-                try:
-                    result = subprocess.run(
-                        command, shell=True, capture_output=True, text=True,
-                        timeout=300, cwd=WORKSPACE,
-                    )
-                    output = result.stdout
-                    if result.stderr:
-                        output += result.stderr
-                    if result.returncode != 0:
-                        output += f"\n[exit_code: {result.returncode}]"
-                    return output or "(no output)"
-                except subprocess.TimeoutExpired:
-                    return "[timeout after 300s]"
-
-            def _run_in_sandbox(command: str) -> str:
-                """Sync workspace, execute in sandbox, sync results back."""
-                _sync_to_sandbox()
-                try:
-                    resp = requests.post(
-                        f"{SANDBOX_URL}/execute",
-                        json={"command": command},
-                        timeout=305,
-                    )
-                    data = resp.json()
-                    output = data.get("stdout", "")
-                    if data.get("stderr"):
-                        output += data["stderr"]
-                    if data.get("exit_code", 0) != 0:
-                        output += f"\n[exit_code: {data['exit_code']}]"
-                    return output or "(no output)"
-                except Exception as e:
-                    return f"[sandbox error: {e}]"
-                finally:
-                    _sync_from_sandbox()
-
-            @mcp.tool()
-            def sandbox_execute(command: str) -> str:
-                """Execute a shell command. Git and gh commands run locally; other commands (npm, node, python, go, make, etc.) run in an isolated sandbox with automatic file sync. Working directory is /workspace."""
-                if _is_local(command):
-                    return _run_local(command)
-                return _run_in_sandbox(command)
-
-            if __name__ == "__main__":
-                mcp.run(transport="stdio")
-
-          # --- MCP config: tells Claude Code to use the sandbox MCP server ---
-          mcp-config.json: |
-            {"mcpServers":{"sandbox":{"command":"python3","args":["/mcp/server.py"]}}}
+            # Cleanup
+            echo "Cleaning up Runner: ${"${RUNNER_NAME}"}"
+            kubectl delete claudecodeagentsandboxrunner ${"${RUNNER_NAME}"} -n ${"${NAMESPACE}"} --timeout=60s || true
+            echo "=== Orchestrator complete ==="
 
           agent-prompt: ${schema.spec.prompt}
 
-    # --- 2. PVC: workspace for cloned repos (CronJob mode only) ---
+    # --- 2. PVC: workspace for cloned repos ---
     - id: workspacePvc
-      includeWhen:
-        - ${schema.spec.schedule != ""}
       template:
         apiVersion: v1
         kind: PersistentVolumeClaim
@@ -465,10 +207,8 @@ spec:
             requests:
               storage: 5Gi
 
-    # --- 3. PVC: Claude memory for session resume (CronJob mode only) ---
+    # --- 3. PVC: Claude memory for session resume ---
     - id: memoryPvc
-      includeWhen:
-        - ${schema.spec.schedule != ""}
       template:
         apiVersion: v1
         kind: PersistentVolumeClaim
@@ -482,195 +222,85 @@ spec:
             requests:
               storage: 1Gi
 
-    # --- 4. Sandbox-only: full Claude Code environment (when no schedule) ---
-    #     The Sandbox IS the isolation — Claude runs with full Bash access inside it.
-    - id: standaloneSandbox
+    # --- 4. Standalone Runner: direct Sandbox execution (when no schedule) ---
+    - id: standaloneRunner
       includeWhen:
         - ${schema.spec.schedule == ""}
       template:
-        apiVersion: agents.x-k8s.io/v1alpha1
-        kind: Sandbox
+        apiVersion: kro.run/v1alpha1
+        kind: ClaudeCodeAgentSandboxRunner
         metadata:
-          name: ${schema.metadata.name}-sandbox
+          name: ${schema.metadata.name}
           namespace: ${schema.metadata.namespace}
         spec:
-          volumeClaimTemplates:
-            - metadata:
-                name: workspace
-              spec:
-                accessModes:
-                  - ReadWriteOnce
-                resources:
-                  requests:
-                    storage: 5Gi
-            - metadata:
-                name: claude-memory
-              spec:
-                accessModes:
-                  - ReadWriteOnce
-                resources:
-                  requests:
-                    storage: 1Gi
+          agentName: ${schema.spec.agentName}
+          agentEmail: ${schema.spec.agentEmail}
+          model: ${schema.spec.model}
+          repo: ${schema.spec.repo}
+          task: ${schema.spec.task}
+          prompt: ${schema.spec.prompt}
+          sessionResume: ${schema.spec.sessionResume}
+          workspacePvcName: ${workspacePvc.metadata.name}
+          memoryPvcName: ${memoryPvc.metadata.name}
+          configMapName: ${agentConfig.metadata.name}
+          credentials:
+            secretName: ${schema.spec.credentials.secretName}
 
-          podTemplate:
-            spec:
-              restartPolicy: Never
-              volumes:
-                - name: scripts
-                  configMap:
-                    name: ${agentConfig.metadata.name}
-                    items:
-                      - key: standalone-entrypoint.sh
-                        path: entrypoint.sh
-                        mode: 0755
-                - name: prompt
-                  configMap:
-                    name: ${agentConfig.metadata.name}
-                    items:
-                      - key: agent-prompt
-                        path: prompt.md
-                - name: proxy-certs
-                  emptyDir: {}
-
-              initContainers:
-                - name: proxy-sidecar
-                  image: credential-proxy:latest
-                  imagePullPolicy: Never
-                  restartPolicy: Always
-                  env:
-                    - name: ANTHROPIC_API_KEY
-                      valueFrom:
-                        secretKeyRef:
-                          name: ${schema.spec.credentials.secretName}
-                          key: ANTHROPIC_API_KEY
-                    - name: GH_TOKEN
-                      valueFrom:
-                        secretKeyRef:
-                          name: ${schema.spec.credentials.secretName}
-                          key: GH_TOKEN
-                  volumeMounts:
-                    - name: proxy-certs
-                      mountPath: /certs
-                  ports:
-                    - containerPort: 8080
-                      protocol: TCP
-                  startupProbe:
-                    exec:
-                      command: ["test", "-f", "/certs/proxy-ca.crt"]
-                    initialDelaySeconds: 1
-                    periodSeconds: 1
-                    failureThreshold: 10
-                  resources:
-                    requests:
-                      memory: "64Mi"
-                      cpu: "50m"
-                    limits:
-                      memory: "128Mi"
-                      cpu: "100m"
-
-              containers:
-                - name: claude-code
-                  image: claude-code:latest
-                  imagePullPolicy: Never
-                  command: ["/bin/bash", "/scripts/entrypoint.sh"]
-                  env:
-                    - name: ANTHROPIC_API_KEY
-                      value: "FAKE_KEY_REPLACED_BY_PROXY"
-                    - name: ANTHROPIC_BASE_URL
-                      value: "http://localhost:8080"
-                    - name: GH_TOKEN
-                      value: "FAKE_GH_TOKEN_REPLACED_BY_PROXY"
-                  envFrom:
-                    - configMapRef:
-                        name: ${agentConfig.metadata.name}
-                  volumeMounts:
-                    - name: workspace
-                      mountPath: /workspace
-                    - name: claude-memory
-                      mountPath: /home/claude/.claude
-                    - name: scripts
-                      mountPath: /scripts
-                    - name: prompt
-                      mountPath: /prompts
-                    - name: proxy-certs
-                      mountPath: /certs
-                      readOnly: true
-                  resources:
-                    requests:
-                      memory: "512Mi"
-                      cpu: "200m"
-                    limits:
-                      memory: "1Gi"
-                      cpu: "1000m"
-
-    # --- 5. Sandbox execution backend: isolated runtime for CronJob (when schedule is set) ---
-    - id: executionSandbox
+    # --- 5. ServiceAccount for CronJob orchestrator (when schedule is set) ---
+    - id: orchestratorSA
       includeWhen:
         - ${schema.spec.schedule != ""}
       template:
-        apiVersion: agents.x-k8s.io/v1alpha1
-        kind: Sandbox
+        apiVersion: v1
+        kind: ServiceAccount
         metadata:
-          name: ${schema.metadata.name}-sandbox
+          name: ${schema.metadata.name}-orchestrator
           namespace: ${schema.metadata.namespace}
-        spec:
-          podTemplate:
-            spec:
-              restartPolicy: Never
-              volumes:
-                - name: workspace
-                  emptyDir: {}
-                - name: scripts
-                  configMap:
-                    name: ${agentConfig.metadata.name}
-                    items:
-                      - key: sandbox-runtime-entrypoint.sh
-                        path: entrypoint.sh
-                        mode: 0755
-                      - key: sandbox_runtime.py
-                        path: sandbox_runtime.py
 
-              containers:
-                - name: sandbox-runtime
-                  image: claude-code:latest
-                  imagePullPolicy: Never
-                  command: ["/bin/bash", "/scripts/entrypoint.sh"]
-                  env:
-                    - name: GH_TOKEN
-                      valueFrom:
-                        secretKeyRef:
-                          name: ${schema.spec.credentials.secretName}
-                          key: GH_TOKEN
-                    - name: SANDBOX_WORKSPACE
-                      value: "/workspace"
-                    - name: PYTHONPATH
-                      value: "/scripts"
-                  envFrom:
-                    - configMapRef:
-                        name: ${agentConfig.metadata.name}
-                  volumeMounts:
-                    - name: workspace
-                      mountPath: /workspace
-                    - name: scripts
-                      mountPath: /scripts
-                  ports:
-                    - containerPort: 8888
-                      protocol: TCP
-                  readinessProbe:
-                    httpGet:
-                      path: /
-                      port: 8888
-                    initialDelaySeconds: 3
-                    periodSeconds: 5
-                  resources:
-                    requests:
-                      memory: "256Mi"
-                      cpu: "100m"
-                    limits:
-                      memory: "512Mi"
-                      cpu: "500m"
+    # --- 6. Role: CRUD on Runners + read Sandboxes/Pods (when schedule is set) ---
+    - id: orchestratorRole
+      includeWhen:
+        - ${schema.spec.schedule != ""}
+      template:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: Role
+        metadata:
+          name: ${schema.metadata.name}-orchestrator
+          namespace: ${schema.metadata.namespace}
+        rules:
+          - apiGroups: ["kro.run"]
+            resources: ["claudecodeagentsandboxes"]
+            verbs: ["get"]
+          - apiGroups: ["kro.run"]
+            resources: ["claudecodeagentsandboxrunners"]
+            verbs: ["create", "delete", "get", "list", "watch"]
+          - apiGroups: ["agents.x-k8s.io"]
+            resources: ["sandboxes"]
+            verbs: ["get", "list", "watch"]
+          - apiGroups: [""]
+            resources: ["pods", "pods/log"]
+            verbs: ["get", "list", "watch"]
 
-    # --- 6. CronJob: recurring agent with MCP sandbox routing (when schedule is set) ---
+    # --- 7. RoleBinding (when schedule is set) ---
+    - id: orchestratorRoleBinding
+      includeWhen:
+        - ${schema.spec.schedule != ""}
+      template:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: RoleBinding
+        metadata:
+          name: ${schema.metadata.name}-orchestrator
+          namespace: ${schema.metadata.namespace}
+        subjects:
+          - kind: ServiceAccount
+            name: ${orchestratorSA.metadata.name}
+            namespace: ${schema.metadata.namespace}
+        roleRef:
+          apiGroup: rbac.authorization.k8s.io
+          kind: Role
+          name: ${orchestratorRole.metadata.name}
+
+    # --- 8. CronJob: orchestrator that creates Runners on schedule ---
     - id: agentCronJob
       includeWhen:
         - ${schema.spec.schedule != ""}
@@ -688,16 +318,17 @@ spec:
           jobTemplate:
             spec:
               backoffLimit: 0
-              activeDeadlineSeconds: 3600
+              activeDeadlineSeconds: 3900
               template:
                 spec:
                   restartPolicy: Never
+                  serviceAccountName: ${orchestratorSA.metadata.name}
                   volumes:
                     - name: scripts
                       configMap:
                         name: ${agentConfig.metadata.name}
                         items:
-                          - key: cronjob-entrypoint.sh
+                          - key: orchestrator-entrypoint.sh
                             path: entrypoint.sh
                             mode: 0755
                     - name: prompt
@@ -706,51 +337,42 @@ spec:
                         items:
                           - key: agent-prompt
                             path: prompt.md
-                    - name: mcp
-                      configMap:
-                        name: ${agentConfig.metadata.name}
-                        items:
-                          - key: mcp-server.py
-                            path: server.py
-                          - key: mcp-config.json
-                            path: config.json
-                    - name: workspace
-                      persistentVolumeClaim:
-                        claimName: ${workspacePvc.metadata.name}
-                    - name: claude-memory
-                      persistentVolumeClaim:
-                        claimName: ${memoryPvc.metadata.name}
-                    - name: proxy-certs
-                      emptyDir: {}
 
-                  initContainers:
-                    - name: proxy-sidecar
-                      image: credential-proxy:latest
+                  containers:
+                    - name: orchestrator
+                      image: bitnami/kubectl:latest
                       imagePullPolicy: Never
-                      restartPolicy: Always
+                      command: ["/bin/bash", "/scripts/entrypoint.sh"]
                       env:
-                        - name: ANTHROPIC_API_KEY
-                          valueFrom:
-                            secretKeyRef:
-                              name: ${schema.spec.credentials.secretName}
-                              key: ANTHROPIC_API_KEY
-                        - name: GH_TOKEN
-                          valueFrom:
-                            secretKeyRef:
-                              name: ${schema.spec.credentials.secretName}
-                              key: GH_TOKEN
+                        - name: PARENT_NAME
+                          value: ${schema.metadata.name}
+                        - name: NAMESPACE
+                          value: ${schema.metadata.namespace}
+                        - name: AGENT_GIT_NAME
+                          value: ${schema.spec.agentName}
+                        - name: AGENT_GIT_EMAIL
+                          value: ${schema.spec.agentEmail}
+                        - name: ANTHROPIC_MODEL
+                          value: ${schema.spec.model}
+                        - name: TARGET_REPO
+                          value: ${schema.spec.repo}
+                        - name: AGENT_TASK
+                          value: ${schema.spec.task}
+                        - name: ENABLE_SESSION_RESUME
+                          value: '${schema.spec.sessionResume ? "true" : "false"}'
+                        - name: WORKSPACE_PVC_NAME
+                          value: ${workspacePvc.metadata.name}
+                        - name: MEMORY_PVC_NAME
+                          value: ${memoryPvc.metadata.name}
+                        - name: CONFIG_MAP_NAME
+                          value: ${agentConfig.metadata.name}
+                        - name: CREDENTIALS_SECRET_NAME
+                          value: ${schema.spec.credentials.secretName}
                       volumeMounts:
-                        - name: proxy-certs
-                          mountPath: /certs
-                      ports:
-                        - containerPort: 8080
-                          protocol: TCP
-                      startupProbe:
-                        exec:
-                          command: ["test", "-f", "/certs/proxy-ca.crt"]
-                        initialDelaySeconds: 1
-                        periodSeconds: 1
-                        failureThreshold: 10
+                        - name: scripts
+                          mountPath: /scripts
+                        - name: prompt
+                          mountPath: /prompts
                       resources:
                         requests:
                           memory: "64Mi"
@@ -758,40 +380,3 @@ spec:
                         limits:
                           memory: "128Mi"
                           cpu: "100m"
-
-                  containers:
-                    - name: claude-code
-                      image: claude-code:latest
-                      imagePullPolicy: Never
-                      command: ["/bin/bash", "/scripts/entrypoint.sh"]
-                      env:
-                        - name: ANTHROPIC_API_KEY
-                          value: "FAKE_KEY_REPLACED_BY_PROXY"
-                        - name: ANTHROPIC_BASE_URL
-                          value: "http://localhost:8080"
-                        - name: GH_TOKEN
-                          value: "FAKE_GH_TOKEN_REPLACED_BY_PROXY"
-                      envFrom:
-                        - configMapRef:
-                            name: ${agentConfig.metadata.name}
-                      volumeMounts:
-                        - name: workspace
-                          mountPath: /workspace
-                        - name: claude-memory
-                          mountPath: /home/claude/.claude
-                        - name: scripts
-                          mountPath: /scripts
-                        - name: prompt
-                          mountPath: /prompts
-                        - name: mcp
-                          mountPath: /mcp
-                        - name: proxy-certs
-                          mountPath: /certs
-                          readOnly: true
-                      resources:
-                        requests:
-                          memory: "512Mi"
-                          cpu: "200m"
-                        limits:
-                          memory: "1Gi"
-                          cpu: "1000m"

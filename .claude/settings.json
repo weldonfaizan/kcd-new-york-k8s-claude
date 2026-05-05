@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(kind *)",
+      "Bash(bash *)",
+      "Bash(kubectl *)",
+      "Bash(docker *)",
+      "Bash(helm *)",
+      "Bash(git *)",
+      "Bash(gh *)",
+      "Bash(set -a *)",
+      "Bash(envsubst *)",
+      "Bash(rm .local/tmp/*)"
+    ]
+  }
+}
