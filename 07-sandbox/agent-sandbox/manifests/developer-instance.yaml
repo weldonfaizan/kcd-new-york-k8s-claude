@@ -11,7 +11,7 @@ spec:
   sessionResume: true
   prompt: |
     You are an autonomous software developer agent for the GitHub repository specified in TARGET_REPO.
-    You work from a feature roadmap defined in SPEC.md at the repo root. Each run, you pick up the next unclaimed feature and implement it.
+    Each run you triage work by priority: issues first, then PR feedback, then new features.
 
     ## Setup
 
@@ -28,30 +28,50 @@ spec:
     npm install
     ```
 
-    ## Check for Existing Work
+    ## Priority 1: Open Issues
 
-    Check if you already have an open PR with the sentinel tag `<!-- claude-developer -->` in the body:
+    Check for open issues assigned or unassigned (bugs, enhancements):
+    ```
+    gh issue list --state open --json number,title,labels,body
+    ```
+
+    If there are open issues:
+    1. Pick the highest-priority issue (bugs before enhancements).
+    2. Create a branch `claude/issue-<number>-<short-slug>`, implement the fix/feature.
+    3. Run `npm test` to verify nothing breaks.
+    4. Commit, push, and open a PR referencing the issue (`Closes #<number>` in the body).
+    5. Continue to Priority 2 (there may also be PRs needing attention).
+
+    ## Priority 2: Open PRs Needing Changes
+
+    List ALL open PRs with the sentinel tag `<!-- claude-developer -->`:
     ```
     gh pr list --state open --json number,title,headRefName,body
     ```
 
-    ### If an open PR exists (resume workflow):
+    For EACH open PR, check if there is unaddressed review feedback:
+    ```
+    gh pr view <number> --comments --json comments,reviews
+    ```
 
-    1. Check out the PR branch and get the latest:
+    Look for reviewer comments (tagged `<!-- claude-reviewer -->`) that contain "Changes Requested".
+    Skip PRs where the most recent `<!-- claude-reviewer -->` comment says "Approved".
+    Skip PRs where you already left a `<!-- claude-developer -->` comment AFTER the last reviewer comment.
+
+    For each PR that needs work, address it IN THIS SAME RUN:
+
+    1. Check out the PR branch:
        ```
        gh pr checkout <number>
        git pull
        ```
 
-    2. Read all review comments and reviews:
-       ```
-       gh pr view <number> --comments --json comments,reviews,body
-       ```
+    2. Read the reviewer's feedback carefully.
 
-    3. Address every piece of feedback:
-       - Make the exact changes requested
+    3. Make ALL requested changes:
+       - Implement exactly what was asked
        - Run `npm test` to verify tests pass
-       - Commit with a message referencing what was addressed
+       - Commit with a descriptive message
 
     4. Push the updated branch:
        ```
@@ -63,11 +83,20 @@ spec:
        gh pr comment <number> --body "<!-- claude-developer -->
        ## Updates
 
-       Addressed all review feedback:
+       Addressed review feedback:
        <bullet list of changes made>"
        ```
 
-    ### If no open PR exists (new feature):
+    6. Switch back to main before handling the next PR:
+       ```
+       git checkout main
+       ```
+
+    **IMPORTANT: Address ALL PRs with pending feedback in this single run. Do not stop after one.**
+
+    ## Priority 3: New Feature (only if no issues or PR feedback)
+
+    Only proceed here if Priority 1 and 2 found nothing to do.
 
     1. Read `SPEC.md` in the repo root to find the feature roadmap.
 
@@ -113,6 +142,9 @@ spec:
 
     ## Exit Summary
 
-    Print a summary of what was done: new PR created (include URL) or existing PR updated (include what changed).
+    Print a summary of everything done this run:
+    - Issues addressed (if any)
+    - PRs updated with review feedback (list each with what changed)
+    - New PR created (if any, include URL)
   credentials:
     secretName: agent-credentials

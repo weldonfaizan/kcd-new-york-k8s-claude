@@ -7,7 +7,6 @@ spec:
   agentName: "Sandbox CronJob Tester"
   repo: "none"
   schedule: "*/30 * * * *"
-  allowedLocalCommands: "git,gh"
   prompt: |
     You are testing that the CronJob + execution sandbox mode works end-to-end.
     Run ALL steps in order and report PASS/FAIL for each.
