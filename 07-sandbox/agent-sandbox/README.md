@@ -1,31 +1,36 @@
 # Concept 07: Agent Sandbox Isolation
 
-Run Claude Code agents inside [agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) pods for **process-level isolation**. The `Sandbox` CRD from `kubernetes-sigs/agent-sandbox` provides lifecycle management, persistent storage via `volumeClaimTemplates`, and optional kernel-level isolation via gVisor.
+Run Claude Code agents inside [agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) pods for **process-level isolation**. The `Sandbox` CRD from `kubernetes-sigs/agent-sandbox` provides lifecycle management and optional kernel-level isolation via gVisor.
 
-The RGD supports two modes based on the `schedule` field:
+Claude Code **always runs fully inside a Sandbox** with full Bash access — the sandbox IS the isolation boundary. Two RGDs work together:
 
-- **No schedule (default)** — a single **Sandbox** runs Claude Code directly with full Bash access. The sandbox IS the isolation boundary. Simplest setup.
-- **With schedule** — a **CronJob** runs Claude on a cron schedule, with a separate **Sandbox** as the execution backend. Bash is disabled; commands route through an MCP server that runs git/gh locally and everything else in the sandbox.
+- **`ClaudeCodeAgentSandboxRunner`** (internal) — creates a single Sandbox CR
+- **`ClaudeCodeAgentSandbox`** (user-facing) — orchestrates PVCs, ConfigMap, and either a Runner (standalone) or a CronJob that creates Runners on schedule
 
 ## What You Learn
 
-- How `kubernetes-sigs/agent-sandbox` provides lifecycle-managed sandbox pods with `volumeClaimTemplates`
-- How the same RGD generates different resources based on a `schedule` field (using KRO `includeWhen`)
-- How `--disallowedTools Bash` + MCP server enables smart command routing (CronJob mode)
+- How `kubernetes-sigs/agent-sandbox` provides lifecycle-managed sandbox pods
+- How two RGDs compose (parent creates child CRs) for clean separation of concerns
+- How a CronJob orchestrator uses `kubectl` to create, monitor, and cleanup Runner instances
+- How `ownerReferences` enable proper garbage collection across the resource chain
 - How `stream-json` output piped through `jq` produces readable, structured logs
 
 ## Architecture
 
-### Sandbox-Only Mode (no schedule)
+### Standalone Mode (no schedule)
 
-Claude Code runs directly inside the Sandbox pod with full Bash access. The Sandbox manages its own PVCs via `volumeClaimTemplates`.
+The parent CR creates a Runner directly. The Runner creates a Sandbox with full Bash access.
 
 ```mermaid
 graph TB
     CR["ClaudeCodeAgentSandbox CR<br/><i>schedule: &quot;&quot;</i>"]
 
     CR --> CM["ConfigMap<br/><i>entrypoint + prompt</i>"]
-    CR --> SB["Sandbox CR"]
+    CR --> WPVC["PVC: workspace"]
+    CR --> MPVC["PVC: memory"]
+    CR --> RUNNER["ClaudeCodeAgentSandboxRunner CR"]
+
+    RUNNER --> SB["Sandbox CR"]
 
     subgraph sandbox ["Sandbox Pod (the isolation boundary)"]
         PROXY["proxy-sidecar<br/><i>ANTHROPIC_API_KEY, GH_TOKEN</i>"]
@@ -33,53 +38,56 @@ graph TB
     end
 
     SB --> sandbox
-    SB --> WPVC["PVC: workspace<br/><i>(volumeClaimTemplate)</i>"]
-    SB --> MPVC["PVC: claude-memory<br/><i>(volumeClaimTemplate)</i>"]
 
     style CR fill:#e1f5fe
+    style RUNNER fill:#e1f5fe
     style sandbox fill:#fff3e0,stroke:#ff9800
     style SB fill:#fff3e0
 ```
 
-### CronJob + Execution Sandbox Mode (with schedule)
+### CronJob Orchestrator Mode (with schedule)
 
-The Sandbox CRD doesn't support scheduling natively, so a CronJob provides the schedule and a separate Sandbox provides isolated command execution.
+The parent CR creates RBAC + CronJob. The CronJob pod uses `kubectl` to create a Runner, wait for it to finish, stream logs, then delete it.
 
 ```mermaid
 graph TB
     CR["ClaudeCodeAgentSandbox CR<br/><i>schedule: &quot;*/30 * * * *&quot;</i>"]
 
-    CR --> CM["ConfigMap<br/><i>entrypoints, prompt,<br/>MCP server, sandbox runtime</i>"]
+    CR --> CM["ConfigMap<br/><i>entrypoint + orchestrator + prompt</i>"]
     CR --> WPVC["PVC: workspace"]
-    CR --> MPVC["PVC: claude-memory"]
-    CR --> SB["Sandbox CR<br/><i>execution backend</i>"]
+    CR --> MPVC["PVC: memory"]
+    CR --> SA["ServiceAccount + Role + RoleBinding"]
     CR --> CRON["CronJob"]
 
-    subgraph cronjob_pod ["CronJob Pod"]
+    subgraph orchestrator_pod ["CronJob Pod (bitnami/kubectl)"]
+        ORCH["orchestrator script<br/><i>kubectl create Runner<br/>kubectl wait Sandbox<br/>kubectl logs<br/>kubectl delete Runner</i>"]
+    end
+
+    CRON --> orchestrator_pod
+    ORCH -->|"creates"| RUNNER["ClaudeCodeAgentSandboxRunner CR<br/><i>(ownerRef → parent CR)</i>"]
+    RUNNER --> SB["Sandbox CR"]
+
+    subgraph sandbox ["Sandbox Pod (the isolation boundary)"]
         PROXY["proxy-sidecar<br/><i>ANTHROPIC_API_KEY, GH_TOKEN</i>"]
-        CLAUDE["claude-code<br/><i>Bash disabled<br/>MCP: sandbox_execute</i>"]
-        CLAUDE -->|"git, gh"| LOCAL["Local exec"]
-        CLAUDE -->|"npm, node,<br/>python, go..."| HTTP["HTTP to sandbox"]
+        CLAUDE["claude-code<br/><i>Full Bash access</i>"]
     end
 
-    subgraph sandbox_pod ["Sandbox Pod"]
-        RUNTIME["FastAPI runtime :8888<br/><i>/execute, /upload,<br/>/download, /list, /exists</i>"]
-    end
-
-    CRON --> cronjob_pod
-    SB --> sandbox_pod
-    HTTP -->|"POST /execute<br/>POST /upload<br/>GET /download"| RUNTIME
+    SB --> sandbox
 
     style CR fill:#e1f5fe
-    style SB fill:#fff3e0
+    style RUNNER fill:#e1f5fe
     style CRON fill:#e8f5e9
-    style cronjob_pod fill:#e8f5e9,stroke:#4caf50
-    style sandbox_pod fill:#fff3e0,stroke:#ff9800
+    style orchestrator_pod fill:#e8f5e9,stroke:#4caf50
+    style sandbox fill:#fff3e0,stroke:#ff9800
+    style SB fill:#fff3e0
 ```
 
-The MCP server checks each command against a configurable whitelist (`allowedLocalCommands`):
-- **`git`, `gh`** (default) → run locally in the CronJob pod (fast, credentials available)
-- **Everything else** → sync workspace to sandbox, execute via HTTP, sync results back
+Key design decisions:
+- **Claude always runs in a Sandbox** — no MCP routing, no split execution
+- **PVCs are siblings** — owned by parent CR, survive Runner deletion
+- **ownerReferences** — Runner points to parent CR for garbage collection on deletion
+- **Stale cleanup** — orchestrator deletes leftover Runners (by label) before creating new ones
+- **Log streaming** — `kubectl logs -f` attaches while pod is alive, captures all output
 
 ## Prerequisites
 
@@ -101,15 +109,11 @@ kubectl create secret generic agent-credentials \
   -n 07-sandbox
 ```
 
-### 2. Rebuild the Claude Code image
-
-Concept 07 requires additional Python packages (FastMCP, FastAPI, uvicorn, requests) and `jq`:
+### 2. Load the kubectl image for CronJob mode
 
 ```bash
-cd 02-claude-k8s-job
-docker build -t claude-code:latest .
-kind load docker-image claude-code:latest --name claude-demo
-cd ..
+docker pull bitnami/kubectl:latest
+kind load docker-image bitnami/kubectl:latest --name claude-demo
 ```
 
 ### 3. Install agent-sandbox controller
@@ -126,46 +130,40 @@ Verify:
 kubectl get crd sandboxes.agents.x-k8s.io
 ```
 
-### 4. Apply the RGD
+### 4. Apply both RGDs
+
+The Runner RGD must be applied first (its CRD is referenced by the parent):
 
 ```bash
+kubectl apply -f 07-sandbox/agent-sandbox/manifests/rgd-runner.yaml
+kubectl wait --for=condition=Ready rgd/claudecodeagentsandboxrunner --timeout=30s
+
 kubectl apply -f 07-sandbox/agent-sandbox/manifests/rgd.yaml
+kubectl wait --for=condition=Ready rgd/claudecodeagentsandbox --timeout=30s
 ```
 
-Verify the CRD was created:
+Verify both CRDs exist:
 
 ```bash
-kubectl get crd claudecodeagentsandboxes.kro.run
+kubectl get crd claudecodeagentsandboxrunners.kro.run claudecodeagentsandboxes.kro.run
 ```
 
 ### 5. Run the standalone smoke test
 
-The test instance runs in **sandbox-only mode** (no schedule) — Claude Code runs directly inside the Sandbox with full Bash access:
+Claude Code runs directly inside a Sandbox with full Bash:
 
 ```bash
 kubectl apply -f 07-sandbox/agent-sandbox/manifests/test-standalone.yaml
 ```
 
-Wait for the Sandbox pod to complete (note: no Job — the Sandbox pod runs Claude directly):
+Wait for the Sandbox to be ready, then stream logs:
 
 ```bash
-kubectl wait --for=jsonpath='{.status.phase}'=Succeeded \
-  pod -l agents.x-k8s.io/sandbox-name-hash -n 07-sandbox --timeout=180s
-```
-
-View the logs:
-
-```bash
-kubectl logs sandbox-test-sandbox -c claude-code -n 07-sandbox --tail=-1
+kubectl wait --for=condition=Ready sandbox/sandbox-test-sandbox -n 07-sandbox --timeout=60s
+kubectl logs -f sandbox-test-sandbox -c claude-code -n 07-sandbox
 ```
 
 #### Expected Output
-
-The logs use `stream-json` output piped through `jq`, producing structured lines:
-
-- `>>> ...` — assistant text (what Claude is thinking/saying)
-- `[tool_name] {...}` — tool calls with input parameters
-- `[done] ...` — final result summary
 
 ```
 Starting Sandbox Tester...
@@ -179,17 +177,7 @@ Mode: sandbox (full Bash)
 [Bash] {"command":"python3 -c \"print('PYTHON_OK')\""}
 [Bash] {"command":"node -e \"console.log('NODE_OK')\""}
 [Bash] {"command":"go version"}
->>> Creating test file for Phase 3:
-[Write] {"file_path":"/workspace/test-input.txt","content":"line one\nline two\nline three\n"}
-[Bash] {"command":"cat /workspace/test-input.txt"}
-[Bash] {"command":"wc -l < /workspace/test-input.txt"}
-[Bash] {"command":"echo \"created-in-sandbox\" > /workspace/sandbox-output.txt"}
-[Read] {"file_path":"/workspace/sandbox-output.txt"}
->>> Phase 5: Environment check.
-[Bash] {"command":"hostname"}
-[Read] {"file_path":"/etc/hostname"}
->>> All tests completed:
-
+...
 | # | Test | Result |
 |---|------|--------|
 | 1 | git --version | PASS |
@@ -197,183 +185,142 @@ Mode: sandbox (full Bash)
 | 3 | python3 | PASS |
 | 4 | node | PASS |
 | 5 | go version | PASS |
-| 6 | cat /workspace/test-input.txt | PASS |
-| 7 | wc -l | PASS |
-| 8 | echo > sandbox file | PASS |
-| 9 | Read sandbox file | PASS |
-| 10 | hostname check | PASS |
+| 6 | File creation | PASS |
+| 7 | Line count | PASS |
+| 8 | Sandbox file write | PASS |
+| 9 | Cross-tool read | PASS |
+| 10 | hostname | PASS |
 
 **SANDBOX TEST COMPLETE**
 [done] All tests completed...
 === Complete (exit: 0) ===
 ```
 
-Notice: in sandbox-only mode, Claude uses the **`[Bash]`** tool directly (not `[mcp__sandbox__sandbox_execute]`). All commands run inside the Sandbox pod — the sandbox IS the isolation.
-
-#### What Each Test Proves
-
-| Phase | Tests | What It Proves |
-|-------|-------|----------------|
-| **Command Execution** | 1-2 | Shell commands work inside the sandbox |
-| **Runtime Support** | 3-5 | Python, Node.js, and Go are all available |
-| **Write → Bash** | 6-7 | Claude's `Write` tool creates files, `Bash` can read them |
-| **Bash → Read** | 8-9 | `Bash` creates files, Claude's `Read` tool can access them |
-| **Environment** | 10 | Confirms execution environment (hostname matches sandbox pod) |
-
-#### Cleanup the Standalone Test
+#### Cleanup
 
 ```bash
 kubectl delete claudecodeagentsandbox sandbox-test -n 07-sandbox
 ```
 
-### 6. Run the CronJob + execution sandbox smoke test
+### 6. Run the CronJob orchestrator smoke test
 
-This test runs in **CronJob mode** (with schedule) — Claude Code runs in a CronJob pod with Bash disabled, routing commands through an MCP server to a separate Sandbox execution backend:
+Tests the full orchestrator flow: CronJob → creates Runner → Sandbox runs → logs streamed → cleanup:
 
 ```bash
 kubectl apply -f 07-sandbox/agent-sandbox/manifests/test-cronjob.yaml
 ```
 
-Verify the resources were created:
+Verify the CronJob resources:
 
 ```bash
-kubectl get claudecodeagentsandbox,sandbox,cronjob,pvc -n 07-sandbox
+kubectl get claudecodeagentsandbox,cronjob,sa,role,rolebinding -n 07-sandbox
 ```
 
-You should see:
-- A `ClaudeCodeAgentSandbox` CR (`sandbox-test-cron`)
-- A `Sandbox` CR (`sandbox-test-cron-sandbox`) — the execution backend
-- A `CronJob` (`sandbox-test-cron`)
-- Two standalone PVCs (`sandbox-test-cron-workspace` and `sandbox-test-cron-memory`)
-
-To trigger a run immediately (instead of waiting for the cron schedule):
+Trigger a manual run:
 
 ```bash
-kubectl create job sandbox-test-cron-manual --from=cronjob/sandbox-test-cron -n 07-sandbox
+kubectl create job --from=cronjob/sandbox-test-cron sandbox-test-cron-manual -n 07-sandbox
 ```
 
-Wait for the job to complete:
+Stream the orchestrator logs (includes full agent output):
 
 ```bash
-kubectl wait --for=condition=complete job/sandbox-test-cron-manual -n 07-sandbox --timeout=180s
+kubectl logs -f job/sandbox-test-cron-manual -n 07-sandbox
 ```
 
-View the logs:
-
-```bash
-kubectl logs job/sandbox-test-cron-manual -c claude-code -n 07-sandbox --tail=-1
-```
-
-#### Expected Output (CronJob Mode)
+#### Expected Output
 
 ```
+Creating Runner: sandbox-test-cron-run-1777954434
+claudecodeagentsandboxrunner.kro.run/sandbox-test-cron-run-1777954434 created
+Waiting for sandbox sandbox-test-cron-run-1777954434-sandbox to start...
+sandbox.agents.x-k8s.io/sandbox-test-cron-run-1777954434-sandbox condition met
+=== Runner logs ===
 Starting Sandbox CronJob Tester...
 Target repo: none
 Model: claude-haiku-4-5-20251001
-Mode: cronjob (MCP sandbox routing)
-Sandbox: http://sandbox-test-cron-sandbox.07-sandbox.svc.cluster.local:8888
-Allowed local: git,gh
+Mode: sandbox (full Bash)
 ---
->>> I'll run through all the CronJob sandbox tests.
-[mcp__sandbox__sandbox_execute] {"command":"git --version"}
-[mcp__sandbox__sandbox_execute] {"command":"echo CRONJOB_ECHO_OK"}
-[mcp__sandbox__sandbox_execute] {"command":"python3 -c \"print('PYTHON_OK')\""}
-[mcp__sandbox__sandbox_execute] {"command":"node -e \"console.log('NODE_OK')\""}
-[mcp__sandbox__sandbox_execute] {"command":"go version"}
+>>> I'll run through all the test phases...
+[Bash] {"command":"git --version"}
 ...
 **CRONJOB SANDBOX TEST COMPLETE**
-[done] All tests completed...
 === Complete (exit: 0) ===
+sandbox.agents.x-k8s.io/sandbox-test-cron-run-1777954434-sandbox condition met
+Cleaning up Runner: sandbox-test-cron-run-1777954434
+claudecodeagentsandboxrunner.kro.run "sandbox-test-cron-run-1777954434" deleted
+=== Orchestrator complete ===
 ```
 
-Notice: in CronJob mode, Claude uses **`[mcp__sandbox__sandbox_execute]`** instead of `[Bash]`. The MCP server routes `git` and `gh` locally, everything else goes to the execution Sandbox.
+Notice: both modes use `[Bash]` — Claude always runs inside a Sandbox with full Bash access.
 
-#### What Each Test Proves (CronJob Mode)
-
-| Phase | Tests | What It Proves |
-|-------|-------|----------------|
-| **Local Routing** | 1 | `git` commands route locally (fast, credentials available) |
-| **Sandbox Routing** | 2-5 | Non-whitelisted commands route to execution Sandbox |
-| **File Operations** | 6-7 | Files created in sandbox are accessible across commands |
-| **Local Commands** | 8-9 | `git config` and `gh` run locally with proper configuration |
-| **Environment** | 10 | Reports sandbox hostname (different from CronJob pod) |
-
-#### Cleanup the CronJob Test
+#### Cleanup
 
 ```bash
 kubectl delete claudecodeagentsandbox sandbox-test-cron -n 07-sandbox
 kubectl delete job sandbox-test-cron-manual -n 07-sandbox --ignore-not-found
 ```
 
-### 7. Deploy the developer agent (sandbox-only)
+### 7. Deploy the developer agent (standalone)
 
-One-shot agent that runs directly inside a Sandbox (no schedule):
+One-shot agent that runs directly inside a Sandbox:
 
 ```bash
 set -a && source .env && set +a
 envsubst '$TESTING_REPO' < 07-sandbox/agent-sandbox/manifests/developer-instance.yaml | kubectl apply -f -
 ```
 
-### 8. Verify resources
+Watch it work:
 
 ```bash
-kubectl get claudecodeagentsandbox,sandbox,configmap,pvc,pod -n 07-sandbox
-```
-
-You should see:
-- A `ClaudeCodeAgentSandbox` CR
-- A `Sandbox` CR (`claude-developer-sandbox`) with two PVCs (managed via `volumeClaimTemplates`)
-- A ConfigMap (`claude-developer-config`)
-- One pod (sandbox with proxy sidecar + claude-code)
-- **No Job or CronJob** (sandbox-only mode)
-
-### 9. Watch the agent work
-
-```bash
+kubectl wait --for=condition=Ready sandbox/claude-developer-sandbox -n 07-sandbox --timeout=60s
 kubectl logs -f claude-developer-sandbox -c claude-code -n 07-sandbox
 ```
 
-You should see:
-1. `Mode: sandbox (full Bash)` in the header
-2. `>>> ` prefixed text (Claude's reasoning)
-3. `[Bash]` tool calls — all commands run directly in the sandbox
-4. `[done]` with the final result
+### 8. Deploy the reviewer agent (CronJob orchestrator)
 
-### 10. (Optional) Deploy the reviewer agent with a schedule
-
-Add a `schedule` field to enable CronJob mode with sandbox execution backend:
+Scheduled agent that creates a fresh Sandbox on each run:
 
 ```bash
 envsubst '$TESTING_REPO' < 07-sandbox/agent-sandbox/manifests/reviewer-instance.yaml | kubectl apply -f -
 ```
 
-In CronJob mode, you'll see:
-- A `Sandbox` CR (execution backend with FastAPI runtime)
-- A `CronJob` (runs Claude on schedule)
-- Two standalone PVCs (persist workspace and memory across CronJob runs)
-- `[mcp__sandbox__sandbox_execute]` tool calls instead of `[Bash]`
+Trigger manually:
 
-### 11. (Optional) Customize the whitelist (CronJob mode)
-
-To allow additional commands to run locally in the CronJob pod (e.g., `curl`):
-
-```yaml
-spec:
-  schedule: "*/30 * * * *"
-  allowedLocalCommands: "git,gh,curl"
+```bash
+kubectl create job --from=cronjob/claude-reviewer claude-reviewer-manual -n 07-sandbox
+kubectl logs -f job/claude-reviewer-manual -n 07-sandbox
 ```
 
-The `allowedLocalCommands` field is ignored in sandbox-only mode (all commands run locally in the sandbox).
+### 9. Run the full feature cycle
+
+The developer and reviewer work together:
+
+1. Developer addresses issues, PR feedback, or implements the next feature
+2. Reviewer reviews PRs, requests changes (missing tests), resolves merge conflicts, and merges
+
+```bash
+# Run developer (standalone — addresses all PRs in one run)
+set -a && source .env && set +a
+envsubst '$TESTING_REPO' < 07-sandbox/agent-sandbox/manifests/developer-instance.yaml | kubectl apply -f -
+kubectl wait --for=condition=Ready sandbox/claude-developer-sandbox -n 07-sandbox --timeout=60s
+kubectl logs -f claude-developer-sandbox -c claude-code -n 07-sandbox
+
+# After developer finishes, run reviewer (CronJob)
+kubectl create job --from=cronjob/claude-reviewer claude-reviewer-manual -n 07-sandbox
+kubectl logs -f job/claude-reviewer-manual -n 07-sandbox
+```
 
 ## Cleanup
 
 ```bash
 # Delete agent instances
 kubectl delete claudecodeagentsandbox claude-developer claude-reviewer sandbox-test sandbox-test-cron -n 07-sandbox --ignore-not-found
-kubectl delete job sandbox-test-cron-manual -n 07-sandbox --ignore-not-found
+kubectl delete job sandbox-test-cron-manual claude-reviewer-manual -n 07-sandbox --ignore-not-found
 
-# Delete the RGD
+# Delete both RGDs
 kubectl delete -f 07-sandbox/agent-sandbox/manifests/rgd.yaml
+kubectl delete -f 07-sandbox/agent-sandbox/manifests/rgd-runner.yaml
 
 # Uninstall agent-sandbox controller
 kubectl delete -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.4.3/manifest.yaml
@@ -383,11 +330,12 @@ kubectl delete -f https://github.com/kubernetes-sigs/agent-sandbox/releases/down
 
 | Aspect | Concept 06 | Concept 07 |
 |---|---|---|
-| Execution | Job or CronJob | Sandbox (one-shot) or CronJob + Sandbox (scheduled) |
+| Execution | Job or CronJob | Sandbox (standalone) or CronJob → Sandbox (scheduled) |
 | Isolation | None — code runs in Job pod | Sandbox CRD provides process isolation |
-| Bash | Full access always | Full in sandbox-only; disabled + MCP routing in CronJob mode |
-| PVC management | Standalone PVCs | `volumeClaimTemplates` (sandbox-only) or standalone PVCs (CronJob) |
-| Log output | Raw `stream-json` | `stream-json` piped through `jq` for readable `>>>`, `[tool]`, `[done]` lines |
-| New dependency | None | `kubernetes-sigs/agent-sandbox` controller, `jq` |
-| Scheduling | `schedule` field → Job or CronJob | `schedule` field → Sandbox-only or CronJob + execution Sandbox |
-| Credential model | Proxy for API + git | Same proxy pattern in both modes |
+| Bash | Full access always | Full access always (inside Sandbox) |
+| Architecture | Single RGD | Two RGDs: Runner (internal) + parent (user-facing) |
+| CronJob mode | Claude runs in CronJob pod | CronJob is just an orchestrator (`bitnami/kubectl`) |
+| PVC management | Standalone PVCs in RGD | Standalone PVCs owned by parent, passed to Runner by name |
+| Ownership | KRO owns everything | ownerReferences for GC + label-based stale cleanup |
+| Log streaming | Direct pod logs | Orchestrator attaches `kubectl logs -f` before pod finishes |
+| New dependency | None | `kubernetes-sigs/agent-sandbox` controller, `bitnami/kubectl` |
