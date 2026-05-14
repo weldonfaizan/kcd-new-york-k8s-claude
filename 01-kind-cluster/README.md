@@ -2,6 +2,8 @@
 
 Create a local Kubernetes cluster using [Kind](https://kind.sigs.k8s.io/) (Kubernetes in Docker) for testing all subsequent concepts.
 
+The setup script is idempotent — it creates the cluster (if not exists), all namespaces for concepts 02-07, and injects credentials from `.env` as Kubernetes Secrets. Re-run it anytime to refresh secrets after editing `.env`.
+
 ## Prerequisites
 
 - Docker running

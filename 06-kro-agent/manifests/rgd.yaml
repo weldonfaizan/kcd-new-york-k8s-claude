@@ -2,15 +2,27 @@ apiVersion: kro.run/v1alpha1
 kind: ResourceGraphDefinition
 metadata:
   name: claudecodeagent
+  annotations:
+    kro.run/allow-breaking-changes: "true"
 spec:
   schema:
     apiVersion: v1alpha1
     kind: ClaudeCodeAgent
 
+    types:
+      Domain:
+        host: string | required=true
+        port: integer | default=443
+        action: 'string | default="credential-replace"'
+        inject_header: string | default=""
+        inject_auth: string | default=""
+        credential_env: string | default=""
+
     spec:
       agentName: string | required=true description="Display name for the agent (used in git commits)"
       agentEmail: string | default="claude-agent@bot.local" description="Git email for the agent"
       model: string | default="claude-haiku-4-5-20251001" description="Claude model to use"
+      logFormat: 'string | default="text" description="Log output format: text or json"'
       repo: string | required=true description="GitHub repository (owner/repo)"
       task: string | default="" description="Optional task description passed as AGENT_TASK env var"
       prompt: string | required=true description="Full agent prompt (mounted at /prompts/prompt.md)"
@@ -18,15 +30,32 @@ spec:
       sessionResume: boolean | default=false description="Enable session resume across runs"
       credentials:
         secretName: string | required=true description="Name of the Secret containing ANTHROPIC_API_KEY and GH_TOKEN"
+      proxy:
+        mode: 'string | default="strict" description="Proxy mode: strict, allow-everything, or block-unknown"'
+        domains: "[]Domain"
 
     status:
       configMapName: ${agentConfig.metadata.name}
+      proxyConfigName: ${proxyConfig.metadata.name}
       workspacePvcName: ${workspacePvc.metadata.name}
       memoryPvcName: ${memoryPvc.metadata.name}
 
   resources:
 
-    # --- 1. ConfigMap: agent configuration, entrypoint script, and prompt ---
+    # --- 1. ConfigMap: proxy configuration (allowlist + cert validity) ---
+    - id: proxyConfig
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: ${schema.metadata.name}-proxy-config
+          namespace: ${schema.metadata.namespace}
+        data:
+          config.yaml: |-
+            mode: ${schema.spec.proxy.mode}
+            domains: ${json.marshal(schema.spec.proxy.domains)}
+
+    # --- 2. ConfigMap: agent configuration, entrypoint script, and prompt ---
     - id: agentConfig
       template:
         apiVersion: v1
@@ -37,6 +66,7 @@ spec:
         data:
           TARGET_REPO: ${schema.spec.repo}
           ANTHROPIC_MODEL: ${schema.spec.model}
+          LOG_FORMAT: ${schema.spec.logFormat}
           AGENT_GIT_EMAIL: ${schema.spec.agentEmail}
           AGENT_GIT_NAME: ${schema.spec.agentName}
           ENABLE_SESSION_RESUME: '${schema.spec.sessionResume ? "true" : ""}'
@@ -49,17 +79,9 @@ spec:
             git config --global user.email "${"${AGENT_GIT_EMAIL:-claude-agent@bot.local}"}"
             git config --global user.name "${"${AGENT_GIT_NAME:-Claude Agent}"}"
 
-            # Route only git and gh through the credential proxy (not all HTTPS traffic)
+            # Trust the proxy CA for MITM'd TLS connections
             if [ -f /certs/combined-ca.crt ]; then
-              git config --global http.proxy http://127.0.0.1:8080
               git config --global http.sslCAInfo /certs/combined-ca.crt
-              mkdir -p "$HOME/bin"
-              cat > "$HOME/bin/gh" << 'GHWRAPPER'
-            #!/bin/bash
-            exec env HTTPS_PROXY=http://127.0.0.1:8080 SSL_CERT_FILE=/certs/combined-ca.crt /usr/bin/gh "$@"
-            GHWRAPPER
-              chmod +x "$HOME/bin/gh"
-              export PATH="$HOME/bin:$PATH"
             fi
 
             # Build prompt: inject env vars as context, then append the prompt file
@@ -93,17 +115,22 @@ spec:
             RAW_LOG="/tmp/claude-raw-$(date +%s).jsonl"
             CLAUDE_EXIT=0
 
-            timeout 3600 claude $CLAUDE_ARGS -- "$PROMPT" \
-              | tee "$RAW_LOG" \
-              | jq --unbuffered -r '
-            if .type == "assistant" then
-              .message.content[]? |
-              if .type == "text" then ">>> " + .text[0:5000]
-              elif .type == "tool_use" then "[" + .name + "] " + ((.input | tostring)[0:3000])
-              else empty end
-            elif .type == "result" then
-              "[done] " + (.result // "complete")[0:5000]
-            else empty end' || CLAUDE_EXIT=$?
+            if [ "${"${LOG_FORMAT:-text}"}" = "json" ]; then
+              timeout 3600 claude $CLAUDE_ARGS -- "$PROMPT" \
+                | tee "$RAW_LOG" || CLAUDE_EXIT=$?
+            else
+              timeout 3600 claude $CLAUDE_ARGS -- "$PROMPT" \
+                | tee "$RAW_LOG" \
+                | jq --unbuffered -r '
+              if .type == "assistant" then
+                .message.content[]? |
+                if .type == "text" then ">>> " + .text[0:5000]
+                elif .type == "tool_use" then "[" + .name + "] " + ((.input | tostring)[0:3000])
+                else empty end
+              elif .type == "result" then
+                "[done] " + (.result // "complete")[0:5000]
+              else empty end' || CLAUDE_EXIT=$?
+            fi
 
             # Mark session for resume on next run
             if [ "${"${ENABLE_SESSION_RESUME:-}"}" = "true" ] && [ "$CLAUDE_EXIT" -eq 0 ]; then
@@ -189,13 +216,62 @@ spec:
                     claimName: ${memoryPvc.metadata.name}
                 - name: proxy-certs
                   emptyDir: {}
+                - name: proxy-config
+                  configMap:
+                    name: ${proxyConfig.metadata.name}
 
               initContainers:
+                # NOTE: PROXY_PORT must match the proxy-sidecar containerPort
+                - name: iptables-init
+                  image: credential-proxy:latest
+                  imagePullPolicy: Never
+                  command: ["/bin/bash", "/app/iptables-init.sh"]
+                  securityContext:
+                    capabilities:
+                      add: ["NET_ADMIN"]
+                    runAsUser: 0
+                    runAsNonRoot: false
+                  env:
+                    - name: PROXY_PORT
+                      value: "15001"
+                    # Must match proxy-sidecar runAsUser
+                    - name: PROXY_UID
+                      value: "1337"
+                  resources:
+                    requests:
+                      memory: "32Mi"
+                      cpu: "10m"
+                    limits:
+                      memory: "64Mi"
+                      cpu: "50m"
+
+                - name: cert-init
+                  image: credential-proxy:latest
+                  imagePullPolicy: Never
+                  command: ["/bin/bash", "/app/cert-init.sh"]
+                  securityContext:
+                    runAsUser: 0
+                    runAsNonRoot: false
+                  volumeMounts:
+                    - name: proxy-certs
+                      mountPath: /certs
+                  resources:
+                    requests:
+                      memory: "32Mi"
+                      cpu: "10m"
+                    limits:
+                      memory: "64Mi"
+                      cpu: "50m"
+
                 - name: proxy-sidecar
                   image: credential-proxy:latest
                   imagePullPolicy: Never
                   restartPolicy: Always
+                  securityContext:
+                    runAsUser: 1337
                   env:
+                    - name: PROXY_PORT
+                      value: "15001"
                     - name: ANTHROPIC_API_KEY
                       valueFrom:
                         secretKeyRef:
@@ -209,8 +285,10 @@ spec:
                   volumeMounts:
                     - name: proxy-certs
                       mountPath: /certs
+                    - name: proxy-config
+                      mountPath: /etc/proxy
                   ports:
-                    - containerPort: 8080
+                    - containerPort: 15001
                       protocol: TCP
                   startupProbe:
                     exec:
@@ -234,10 +312,12 @@ spec:
                   env:
                     - name: ANTHROPIC_API_KEY
                       value: "FAKE_KEY_REPLACED_BY_PROXY"
-                    - name: ANTHROPIC_BASE_URL
-                      value: "http://localhost:8080"
                     - name: GH_TOKEN
                       value: "FAKE_GH_TOKEN_REPLACED_BY_PROXY"
+                    - name: NODE_EXTRA_CA_CERTS
+                      value: "/certs/proxy-ca.crt"
+                    - name: SSL_CERT_FILE
+                      value: "/certs/combined-ca.crt"
                   envFrom:
                     - configMapRef:
                         name: ${agentConfig.metadata.name}
@@ -304,13 +384,62 @@ spec:
                         claimName: ${memoryPvc.metadata.name}
                     - name: proxy-certs
                       emptyDir: {}
+                    - name: proxy-config
+                      configMap:
+                        name: ${proxyConfig.metadata.name}
 
                   initContainers:
+                    # NOTE: PROXY_PORT must match the proxy-sidecar containerPort
+                    - name: iptables-init
+                      image: credential-proxy:latest
+                      imagePullPolicy: Never
+                      command: ["/bin/bash", "/app/iptables-init.sh"]
+                      securityContext:
+                        capabilities:
+                          add: ["NET_ADMIN"]
+                        runAsUser: 0
+                        runAsNonRoot: false
+                      env:
+                        - name: PROXY_PORT
+                          value: "15001"
+                        # Must match proxy-sidecar runAsUser
+                        - name: PROXY_UID
+                          value: "1337"
+                      resources:
+                        requests:
+                          memory: "32Mi"
+                          cpu: "10m"
+                        limits:
+                          memory: "64Mi"
+                          cpu: "50m"
+
+                    - name: cert-init
+                      image: credential-proxy:latest
+                      imagePullPolicy: Never
+                      command: ["/bin/bash", "/app/cert-init.sh"]
+                      securityContext:
+                        runAsUser: 0
+                        runAsNonRoot: false
+                      volumeMounts:
+                        - name: proxy-certs
+                          mountPath: /certs
+                      resources:
+                        requests:
+                          memory: "32Mi"
+                          cpu: "10m"
+                        limits:
+                          memory: "64Mi"
+                          cpu: "50m"
+
                     - name: proxy-sidecar
                       image: credential-proxy:latest
                       imagePullPolicy: Never
                       restartPolicy: Always
+                      securityContext:
+                        runAsUser: 1337
                       env:
+                        - name: PROXY_PORT
+                          value: "15001"
                         - name: ANTHROPIC_API_KEY
                           valueFrom:
                             secretKeyRef:
@@ -324,8 +453,10 @@ spec:
                       volumeMounts:
                         - name: proxy-certs
                           mountPath: /certs
+                        - name: proxy-config
+                          mountPath: /etc/proxy
                       ports:
-                        - containerPort: 8080
+                        - containerPort: 15001
                           protocol: TCP
                       startupProbe:
                         exec:
@@ -349,10 +480,12 @@ spec:
                       env:
                         - name: ANTHROPIC_API_KEY
                           value: "FAKE_KEY_REPLACED_BY_PROXY"
-                        - name: ANTHROPIC_BASE_URL
-                          value: "http://localhost:8080"
                         - name: GH_TOKEN
                           value: "FAKE_GH_TOKEN_REPLACED_BY_PROXY"
+                        - name: NODE_EXTRA_CA_CERTS
+                          value: "/certs/proxy-ca.crt"
+                        - name: SSL_CERT_FILE
+                          value: "/certs/combined-ca.crt"
                       envFrom:
                         - configMapRef:
                             name: ${agentConfig.metadata.name}

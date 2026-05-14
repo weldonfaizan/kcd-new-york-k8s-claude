@@ -23,26 +23,23 @@ The parent CR creates a Runner directly. The Runner creates a Sandbox with full 
 
 ```mermaid
 graph TB
-    CR["ClaudeCodeAgentSandbox CR<br/><i>schedule: &quot;&quot;</i>"]
-
-    CR --> CM["ConfigMap<br/><i>entrypoint + prompt</i>"]
+    CR["ClaudeCodeAgentSandbox CR"]
+    CR --> CM["ConfigMap"]
     CR --> WPVC["PVC: workspace"]
     CR --> MPVC["PVC: memory"]
-    CR --> RUNNER["ClaudeCodeAgentSandboxRunner CR"]
-
+    CR --> RUNNER["SandboxRunner CR"]
     RUNNER --> SB["Sandbox CR"]
+    SB --> PROXY["proxy-sidecar"]
+    SB --> CLAUDE["claude-code"]
 
-    subgraph sandbox ["Sandbox Pod (the isolation boundary)"]
-        PROXY["proxy-sidecar<br/><i>ANTHROPIC_API_KEY, GH_TOKEN</i>"]
-        CLAUDE["claude-code<br/><i>Full Bash access<br/>Read, Write, Edit, Glob, Grep</i>"]
-    end
-
-    SB --> sandbox
-
-    style CR fill:#e1f5fe
-    style RUNNER fill:#e1f5fe
-    style sandbox fill:#fff3e0,stroke:#ff9800
-    style SB fill:#fff3e0
+    style CR fill:#e7f5ff,stroke:#1971c2,color:#1e1e1e
+    style CM fill:#f8f9fa,stroke:#495057,color:#1e1e1e
+    style WPVC fill:#fff3bf,stroke:#e8590c,color:#1e1e1e
+    style MPVC fill:#fff3bf,stroke:#e8590c,color:#1e1e1e
+    style RUNNER fill:#e7f5ff,stroke:#1971c2,color:#1e1e1e
+    style SB fill:#fff3bf,stroke:#e8590c,color:#1e1e1e
+    style PROXY fill:#f8f0fc,stroke:#862e9c,color:#1e1e1e
+    style CLAUDE fill:#ebfbee,stroke:#2f9e44,color:#1e1e1e
 ```
 
 ### CronJob Orchestrator Mode (with schedule)
@@ -51,35 +48,31 @@ The parent CR creates RBAC + CronJob. The CronJob pod uses `kubectl` to create a
 
 ```mermaid
 graph TB
-    CR["ClaudeCodeAgentSandbox CR<br/><i>schedule: &quot;*/30 * * * *&quot;</i>"]
-
-    CR --> CM["ConfigMap<br/><i>entrypoint + orchestrator + prompt</i>"]
+    CR["ClaudeCodeAgentSandbox CR"]
+    CR --> CM["ConfigMap"]
     CR --> WPVC["PVC: workspace"]
     CR --> MPVC["PVC: memory"]
-    CR --> SA["ServiceAccount + Role + RoleBinding"]
+    CR --> SA["RBAC"]
     CR --> CRON["CronJob"]
-
-    subgraph orchestrator_pod ["CronJob Pod (bitnami/kubectl)"]
-        ORCH["orchestrator script<br/><i>kubectl create Runner<br/>kubectl wait Sandbox<br/>kubectl logs<br/>kubectl delete Runner</i>"]
-    end
-
-    CRON --> orchestrator_pod
-    ORCH -->|"creates"| RUNNER["ClaudeCodeAgentSandboxRunner CR<br/><i>(ownerRef → parent CR)</i>"]
+    CRON --> ORCH["Orchestrator Pod"]
+    ORCH -->|creates| RUNNER["SandboxRunner CR"]
     RUNNER --> SB["Sandbox CR"]
+    SB --> PROXY["proxy-sidecar"]
+    SB --> CLAUDE["claude-code"]
+    ORCH -->|waits + streams logs| SB
+    ORCH -->|deletes| RUNNER
 
-    subgraph sandbox ["Sandbox Pod (the isolation boundary)"]
-        PROXY["proxy-sidecar<br/><i>ANTHROPIC_API_KEY, GH_TOKEN</i>"]
-        CLAUDE["claude-code<br/><i>Full Bash access</i>"]
-    end
-
-    SB --> sandbox
-
-    style CR fill:#e1f5fe
-    style RUNNER fill:#e1f5fe
-    style CRON fill:#e8f5e9
-    style orchestrator_pod fill:#e8f5e9,stroke:#4caf50
-    style sandbox fill:#fff3e0,stroke:#ff9800
-    style SB fill:#fff3e0
+    style CR fill:#e7f5ff,stroke:#1971c2,color:#1e1e1e
+    style CM fill:#f8f9fa,stroke:#495057,color:#1e1e1e
+    style WPVC fill:#fff3bf,stroke:#e8590c,color:#1e1e1e
+    style MPVC fill:#fff3bf,stroke:#e8590c,color:#1e1e1e
+    style SA fill:#f8f9fa,stroke:#495057,color:#1e1e1e
+    style CRON fill:#ebfbee,stroke:#2f9e44,color:#1e1e1e
+    style ORCH fill:#ebfbee,stroke:#2f9e44,color:#1e1e1e
+    style RUNNER fill:#e7f5ff,stroke:#1971c2,color:#1e1e1e
+    style SB fill:#fff3bf,stroke:#e8590c,color:#1e1e1e
+    style PROXY fill:#f8f0fc,stroke:#862e9c,color:#1e1e1e
+    style CLAUDE fill:#ebfbee,stroke:#2f9e44,color:#1e1e1e
 ```
 
 Key design decisions:
@@ -97,42 +90,42 @@ Key design decisions:
 
 ## Step-by-Step
 
-### 1. Create the namespace and secret
+### 1. Ensure cluster is ready
+
+The namespace and secret are created by the cluster setup script:
 
 ```bash
-kubectl create namespace 07-sandbox 2>/dev/null || true
-
-set -a && source .env && set +a
-kubectl create secret generic agent-credentials \
-  --from-literal=ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY \
-  --from-literal=GH_TOKEN=$GH_TOKEN \
-  -n 07-sandbox
+bash 01-kind-cluster/scripts/create-cluster.sh
 ```
 
-### 2. Load the kubectl image for CronJob mode
+### 2. Install KRO (skip if already installed)
+
+```bash
+helm list -n kro-system | grep -q kro || \
+  helm install kro oci://registry.k8s.io/kro/charts/kro --namespace kro-system --create-namespace
+kubectl wait --for=condition=Available deploy -n kro-system --all --timeout=60s
+```
+
+### 3. Install agent-sandbox controller (skip if already installed)
+
+```bash
+kubectl get crd sandboxes.agents.x-k8s.io &>/dev/null || {
+  VERSION=$(curl -s https://api.github.com/repos/kubernetes-sigs/agent-sandbox/releases/latest | grep tag_name | cut -d'"' -f4)
+  kubectl apply -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/manifest.yaml"
+}
+kubectl wait --for=condition=Available deploy -n agent-sandbox-system --all --timeout=60s
+```
+
+### 4. Load the kubectl image for CronJob mode
 
 ```bash
 docker pull bitnami/kubectl:latest
 kind load docker-image bitnami/kubectl:latest --name claude-demo
 ```
 
-### 3. Install agent-sandbox controller
+### 5. Apply both RGDs
 
-```bash
-export VERSION="v0.4.3"
-kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/manifest.yaml
-kubectl wait --for=condition=Available deploy -n agent-sandbox-system --all --timeout=60s
-```
-
-Verify:
-
-```bash
-kubectl get crd sandboxes.agents.x-k8s.io
-```
-
-### 4. Apply both RGDs
-
-The Runner RGD must be applied first (its CRD is referenced by the parent):
+The Runner RGD must be applied **first** (the parent references its CRD):
 
 ```bash
 kubectl apply -f 07-sandbox/agent-sandbox/manifests/rgd-runner.yaml
@@ -148,7 +141,7 @@ Verify both CRDs exist:
 kubectl get crd claudecodeagentsandboxrunners.kro.run claudecodeagentsandboxes.kro.run
 ```
 
-### 5. Run the standalone smoke test
+### 6. Run the standalone smoke test
 
 Claude Code runs directly inside a Sandbox with full Bash:
 
@@ -202,7 +195,7 @@ Mode: sandbox (full Bash)
 kubectl delete claudecodeagentsandbox sandbox-test -n 07-sandbox
 ```
 
-### 6. Run the CronJob orchestrator smoke test
+### 7. Run the CronJob orchestrator smoke test
 
 Tests the full orchestrator flow: CronJob → creates Runner → Sandbox runs → logs streamed → cleanup:
 
@@ -261,7 +254,7 @@ kubectl delete claudecodeagentsandbox sandbox-test-cron -n 07-sandbox
 kubectl delete job sandbox-test-cron-manual -n 07-sandbox --ignore-not-found
 ```
 
-### 7. Deploy the developer agent (standalone)
+### 8. Deploy the developer agent (standalone)
 
 One-shot agent that runs directly inside a Sandbox:
 
@@ -277,7 +270,7 @@ kubectl wait --for=condition=Ready sandbox/claude-developer-sandbox -n 07-sandbo
 kubectl logs -f claude-developer-sandbox -c claude-code -n 07-sandbox
 ```
 
-### 8. Deploy the reviewer agent (CronJob orchestrator)
+### 9. Deploy the reviewer agent (CronJob orchestrator)
 
 Scheduled agent that creates a fresh Sandbox on each run:
 
@@ -292,7 +285,7 @@ kubectl create job --from=cronjob/claude-reviewer claude-reviewer-manual -n 07-s
 kubectl logs -f job/claude-reviewer-manual -n 07-sandbox
 ```
 
-### 9. Run the full feature cycle
+### 10. Run the full feature cycle
 
 The developer and reviewer work together:
 
@@ -323,7 +316,8 @@ kubectl delete -f 07-sandbox/agent-sandbox/manifests/rgd.yaml
 kubectl delete -f 07-sandbox/agent-sandbox/manifests/rgd-runner.yaml
 
 # Uninstall agent-sandbox controller
-kubectl delete -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.4.3/manifest.yaml
+VERSION=$(curl -s https://api.github.com/repos/kubernetes-sigs/agent-sandbox/releases/latest | grep tag_name | cut -d'"' -f4)
+kubectl delete -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/manifest.yaml"
 ```
 
 ## What Changed from Concept 06

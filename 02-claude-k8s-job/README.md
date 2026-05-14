@@ -2,25 +2,32 @@
 
 Run Claude Code CLI as a one-shot Kubernetes Job. The simplest way to get Claude Code running on K8s.
 
-## Concept
+## Problem
 
+You want to run Claude Code in a cluster — but how? Claude Code is a CLI tool designed for interactive terminal use. It needs an API key, a prompt, and a way to stream output.
+
+## Solution
+
+Package Claude Code into a container image, pass the API key via a Kubernetes Secret, the prompt via an environment variable, and stream JSON output to `kubectl logs`.
+
+```mermaid
+flowchart TD
+    secret["K8s Secret<br/>ANTHROPIC_API_KEY"]
+    job["Kubernetes Job"]
+    container["claude-code container<br/>claude -p -- $PROMPT"]
+    logs["kubectl logs<br/>stream-json output"]
+
+    secret --> container
+    job --> container
+    container --> logs
+
+    style secret fill:#f8f0fc,stroke:#862e9c,color:#1e1e1e
+    style job fill:#e7f5ff,stroke:#1971c2,color:#1e1e1e
+    style container fill:#ebfbee,stroke:#2f9e44,color:#1e1e1e
+    style logs fill:#f8f9fa,stroke:#495057,color:#1e1e1e
 ```
-┌─────────────────────────────────────┐
-│ Kubernetes Job                      │
-│                                     │
-│  ┌─────────────────────────────┐    │
-│  │ claude-code container       │    │
-│  │                             │    │
-│  │ ANTHROPIC_API_KEY (Secret)  │    │
-│  │ PROMPT (env var)     │    │
-│  │                             │    │
-│  │ claude -p -- $PROMPT        │    │
-│  └─────────────────────────────┘    │
-│                                     │
-└─────────────────────────────────────┘
-         │
-         ▼ stdout (stream-json) → kubectl logs
-```
+
+This is the foundation — concepts 03+ build on this by adding credential security, autonomous agents, and orchestration.
 
 ## Manifest Walkthrough
 

@@ -51,5 +51,10 @@ spec:
     | # | Test | Result |
     With PASS/FAIL for each step.
     End with "CRONJOB SANDBOX TEST COMPLETE".
+  proxy:
+    domains:
+      - host: api.anthropic.com
+        inject_header: x-api-key
+        credential_env: ANTHROPIC_API_KEY
   credentials:
     secretName: agent-credentials

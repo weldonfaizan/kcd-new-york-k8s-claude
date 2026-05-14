@@ -16,22 +16,29 @@ spec:
             - /bin/bash
             - -c
             - |
-              claude -p --dangerously-skip-permissions --verbose --output-format stream-json \
-                --model "${ANTHROPIC_MODEL}" -- "${PROMPT}" \
-                | jq --unbuffered -r '
-              if .type == "assistant" then
-                .message.content[]? |
-                if .type == "text" then ">>> " + .text[0:5000]
-                elif .type == "tool_use" then "[" + .name + "] " + ((.input | tostring)[0:3000])
-                else empty end
-              elif .type == "result" then
-                "[done] " + (.result // "complete")[0:5000]
-              else empty end'
+              if [ "${LOG_FORMAT}" = "json" ]; then
+                claude -p --dangerously-skip-permissions --verbose --output-format stream-json \
+                  --model "${ANTHROPIC_MODEL}" -- "${PROMPT}"
+              else
+                claude -p --dangerously-skip-permissions --verbose --output-format stream-json \
+                  --model "${ANTHROPIC_MODEL}" -- "${PROMPT}" \
+                  | jq --unbuffered -r '
+                if .type == "assistant" then
+                  .message.content[]? |
+                  if .type == "text" then ">>> " + .text[0:5000]
+                  elif .type == "tool_use" then "[" + .name + "] " + ((.input | tostring)[0:3000])
+                  else empty end
+                elif .type == "result" then
+                  "[done] " + (.result // "complete")[0:5000]
+                else empty end'
+              fi
           env:
             - name: ANTHROPIC_MODEL
               value: "claude-haiku-4-5-20251001"
             - name: PROMPT
               value: "Print all environment variables you can see"
+            - name: LOG_FORMAT
+              value: "text"
           envFrom:
             - secretRef:
                 name: agent-credentials

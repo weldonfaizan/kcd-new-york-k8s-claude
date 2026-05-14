@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: proxy-config
+  namespace: 05-developer-agent
+data:
+  config.yaml: |
+    domains:
+      - host: api.anthropic.com
+        inject_header: x-api-key
+        credential_env: ANTHROPIC_API_KEY
+
+      - host: github.com
+        inject_auth: basic
+        credential_env: GH_TOKEN
+
+      - host: api.github.com
+        inject_auth: basic
+        credential_env: GH_TOKEN

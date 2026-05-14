@@ -2,29 +2,36 @@
 
 An autonomous developer agent that implements features, submits PRs, and addresses review comments. Uses persistent storage to maintain workspace and Claude memory across pod restarts.
 
-## Concept
+## Problem
 
-```
-┌────────────────────────────────────────────────────────────┐
-│ Kubernetes Job                                             │
-│                                                            │
-│  ┌──────────────────────────────┐  ┌────────────────────┐ │
-│  │ claude-code container        │  │ proxy sidecar      │ │
-│  │                              │  │                    │ │
-│  │ 1. Clone/fetch target repo   │  │ Injects:           │ │
-│  │ 2. Check for existing PR     │  │ - ANTHROPIC_API_KEY│ │
-│  │ 3a. New: implement feature   │  │ - GH_TOKEN       │ │
-│  │ 3b. Resume: address comments │  │                    │ │
-│  │ 4. Commit, push, open/update │  │                    │ │
-│  │    PR                        │  │                    │ │
-│  └──────────┬───────────────────┘  └────────────────────┘ │
-│             │                                              │
-│  ┌──────────▼───────────────────────────────────────────┐  │
-│  │ PersistentVolumes                                    │  │
-│  │  /workspace (code + git worktrees)                   │  │
-│  │  /home/claude/.claude (memory + sessions)            │  │
-│  └──────────────────────────────────────────────────────┘  │
-└────────────────────────────────────────────────────────────┘
+A one-shot Job (concept 04) works for reviews, but a developer agent needs to remember its previous work — the code it checked out, the PR it opened, the session context. Without persistence, every run starts from scratch and can't iterate on feedback.
+
+## Solution
+
+PersistentVolumeClaims (PVCs) give the agent durable storage for its workspace and Claude's session memory. Combined with `--continue` (session resume), the agent picks up where it left off — reading new review comments and addressing them without re-cloning or re-implementing.
+
+```mermaid
+flowchart TD
+    subgraph pod["Kubernetes Job"]
+        direction LR
+        claude["claude-code<br/>1. Clone/fetch repo<br/>2. Resume or new feature<br/>3. Address review feedback<br/>4. Push + open/update PR"]
+        proxy["proxy-sidecar<br/>credential-replace"]
+    end
+    subgraph storage["Persistent Storage"]
+        ws["PVC: workspace<br/>/workspace"]
+        mem["PVC: memory<br/>/home/claude/.claude"]
+    end
+    claude --> storage
+    claude -- "iptables" --> proxy
+    proxy --> gh["github.com"]
+    proxy --> api["api.anthropic.com"]
+
+    style claude fill:#e7f5ff,stroke:#1971c2,color:#1e1e1e
+    style proxy fill:#f8f0fc,stroke:#862e9c,color:#1e1e1e
+    style ws fill:#fff3bf,stroke:#e8590c,color:#1e1e1e
+    style mem fill:#fff3bf,stroke:#e8590c,color:#1e1e1e
+    style gh fill:#ebfbee,stroke:#2f9e44,color:#1e1e1e
+    style api fill:#ebfbee,stroke:#2f9e44,color:#1e1e1e
 ```
 
 ## Key Features
@@ -36,56 +43,45 @@ An autonomous developer agent that implements features, submits PRs, and address
 
 ## Prerequisites
 
-- Kind cluster running (see [01-kind-cluster](../01-kind-cluster/))
-- Claude Code image loaded (see [02-claude-k8s-job](../02-claude-k8s-job/))
-- Proxy image loaded (see [03-sidecar-proxy](../03-sidecar-proxy/))
-- `.env` file with both `ANTHROPIC_API_KEY` and `GH_TOKEN` set
-- `TESTING_REPO` set in `.env` (see [Target Repo Setup](../README.md#target-repo-setup))
+- Kind cluster running with secrets (`make all` or see [01-kind-cluster](../01-kind-cluster/))
+- Both images built and loaded (`make build && make load`)
+- `.env` file with `ANTHROPIC_API_KEY`, `GH_TOKEN`, and `TESTING_REPO`
 
 ## Step-by-Step
 
-### 1. Create the PersistentVolumeClaims
+All commands run from the **project root**.
+
+### 1. Run with Make (recommended)
 
 ```bash
-kubectl apply -f manifests/pvc.yaml
+make run-05
+make logs-05         # Claude output
+make proxy-logs-05   # proxy ALLOWED/BLOCKED log
 ```
 
-### 2. Create the Secret
+### 2. Or manually
 
 ```bash
-kubectl create secret generic agent-credentials \
-  --from-env-file=../../.env \
-  -n 05-developer-agent
-```
+# Apply configmaps and PVCs (substitute TESTING_REPO from .env)
+set -a && source .env && set +a
+envsubst '$TESTING_REPO' < 05-developer-agent/manifests/configmap.yaml | kubectl apply -f -
+kubectl apply -f 05-developer-agent/manifests/proxy-configmap.yaml
+kubectl apply -f 05-developer-agent/manifests/pvc.yaml
+kubectl apply -f 05-developer-agent/manifests/job.yaml
 
-### 3. Apply the ConfigMap
-
-The agent reads its feature roadmap from `SPEC.md` in the target repo. Apply the config:
-
-```bash
-set -a && source ../../.env && set +a
-envsubst '$TESTING_REPO' < manifests/configmap.yaml | kubectl apply -f -
-```
-
-### 4. Run the Developer Agent
-
-```bash
-kubectl apply -f manifests/job.yaml
-```
-
-### 5. Watch the output
-
-```bash
+# Watch output
 kubectl logs -f job/claude-developer -c claude-code -n 05-developer-agent
 ```
 
-### 6. Re-run after review comments
+### 3. Re-run after review comments
 
-After the Code Reviewer (concept 04) or a human leaves comments on the PR, delete the completed job and re-run:
+After the Code Reviewer (concept 04) or a human leaves comments on the PR:
 
 ```bash
-kubectl delete job claude-developer -n 05-developer-agent
-kubectl apply -f manifests/job.yaml
+make run-05
+# Or manually:
+kubectl delete job claude-developer -n 05-developer-agent --ignore-not-found
+kubectl apply -f 05-developer-agent/manifests/job.yaml
 ```
 
 The agent will resume its session, read the review comments, and address them.

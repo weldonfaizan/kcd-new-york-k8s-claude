@@ -1,56 +1,80 @@
 # 06 - KRO ClaudeCodeAgent Abstraction
 
-Define a `ClaudeCodeAgent` custom resource using [KRO](https://kro.run/) that encapsulates the entire agent pattern (sidecar proxy, entrypoint, PVCs) behind a simple API. One resource replaces the copy-paste boilerplate from concepts 04 and 05.
+Define a `ClaudeCodeAgent` custom resource using [KRO](https://kro.run/) that encapsulates the entire agent pattern behind a simple API.
+
+## Problem
+
+Deploying a Claude Code agent (concepts 04-05) requires creating 5+ resources manually: ConfigMap, PVCs, proxy-config, Job/CronJob — each with specific env vars, volume mounts, and init containers. This boilerplate is error-prone to copy across teams and environments.
+
+## Solution
+
+A single `ClaudeCodeAgent` custom resource replaces all the boilerplate. KRO's ResourceGraphDefinition generates everything from a concise spec — including the proxy allowlist, credentials, and scheduling.
+
+```mermaid
+flowchart LR
+    subgraph user["What you write"]
+        cr["ClaudeCodeAgent CR<br/>repo, prompt, proxy.domains"]
+    end
+    subgraph generated["What KRO generates"]
+        cm["ConfigMap<br/>entrypoint + prompt"]
+        pcm["ConfigMap<br/>proxy-config"]
+        pvc1["PVC: workspace"]
+        pvc2["PVC: memory"]
+        job["Job or CronJob"]
+    end
+    cr --> generated
+
+    style cr fill:#e7f5ff,stroke:#1971c2,color:#1e1e1e
+    style cm fill:#f8f9fa,stroke:#495057,color:#1e1e1e
+    style pcm fill:#f8f0fc,stroke:#862e9c,color:#1e1e1e
+    style pvc1 fill:#fff3bf,stroke:#e8590c,color:#1e1e1e
+    style pvc2 fill:#fff3bf,stroke:#e8590c,color:#1e1e1e
+    style job fill:#ebfbee,stroke:#2f9e44,color:#1e1e1e
+```
 
 ## What KRO Generates
 
-From a single `ClaudeCodeAgent` instance, KRO creates 5 resources:
+From a single `ClaudeCodeAgent` instance, KRO creates 6 resources:
 
 | # | Resource | Condition |
 |---|----------|-----------|
-| 1 | ConfigMap (entrypoint + prompt + env vars) | Always |
-| 2 | PVC (workspace for cloned repos) | Always |
-| 3 | PVC (Claude memory for session resume) | Always |
-| 4 | Job (one-shot agent) | `schedule == ""` |
-| 5 | CronJob (recurring agent) | `schedule != ""` |
+| 1 | ConfigMap (proxy allowlist) | Always |
+| 2 | ConfigMap (entrypoint + prompt + env vars) | Always |
+| 3 | PVC (workspace for cloned repos) | Always |
+| 4 | PVC (Claude memory for session resume) | Always |
+| 5 | Job (one-shot agent) | `schedule == ""` |
+| 6 | CronJob (recurring agent) | `schedule != ""` |
 
 ## Prerequisites
 
 - Completed concepts [01](../01-kind-cluster/) through [05](../05-developer-agent/) (Kind cluster running, images built)
-- [KRO installed](https://kro.run/docs/getting-started/Installation) in the cluster
+- [KRO](https://kro.run) installed in the cluster
 
 ## Step-by-Step
 
-### 1. Create the namespace and secret
+All commands run from the **project root**.
+
+### 1. Ensure cluster is ready
+
+The namespace and secret are created by the cluster setup script:
 
 ```bash
-kubectl create namespace 06-kro-agent 2>/dev/null || true
-
-set -a && source .env && set +a
-kubectl create secret generic agent-credentials \
-  --from-literal=ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY \
-  --from-literal=GH_TOKEN=$GH_TOKEN \
-  -n 06-kro-agent
+bash 01-kind-cluster/scripts/create-cluster.sh
 ```
 
-### 2. Install KRO (if not already installed)
+### 2. Install KRO (skip if already installed)
 
 ```bash
-# Check if kro is running
-kubectl get pods -n kro-system
-
-# If not installed:
-helm install kro oci://registry.k8s.io/kro/charts/kro \
-  --namespace kro-system \
-  --create-namespace
-
-# Learn more: https://kro.run/docs/getting-started/Installation
+helm list -n kro-system | grep -q kro || \
+  helm install kro oci://registry.k8s.io/kro/charts/kro --namespace kro-system --create-namespace
+kubectl wait --for=condition=Available deploy -n kro-system --all --timeout=60s
 ```
 
 ### 3. Apply the ResourceGraphDefinition
 
 ```bash
 kubectl apply -f 06-kro-agent/manifests/rgd.yaml
+kubectl wait --for=condition=Ready rgd/claudecodeagent --timeout=30s
 ```
 
 Verify the CRD was generated:
@@ -59,18 +83,24 @@ Verify the CRD was generated:
 kubectl get crd claudecodeagents.kro.run
 ```
 
-### 4. Deploy a Reviewer (CronJob mode)
+### 4. Deploy a Developer (one-shot Job)
 
 ```bash
-set -a && source ../../.env && set +a
-envsubst '$TESTING_REPO' < 06-kro-agent/manifests/reviewer-instance.yaml | kubectl apply -f -
+set -a && source .env && set +a
+envsubst '$TESTING_REPO' < 06-kro-agent/manifests/developer-instance.yaml | kubectl apply -f -
 ```
 
-### 5. Deploy a Developer (Job mode)
+Watch progress:
 
 ```bash
-set -a && source ../../.env && set +a
-envsubst '$TESTING_REPO' < 06-kro-agent/manifests/developer-instance.yaml | kubectl apply -f -
+kubectl wait --for=condition=Ready claudecodeagent/claude-developer -n 06-kro-agent --timeout=60s
+kubectl logs -f -l kro.run/instance-name=claude-developer -c claude-code -n 06-kro-agent
+```
+
+### 5. Check proxy logs
+
+```bash
+kubectl logs -l kro.run/instance-name=claude-developer -c proxy-sidecar -n 06-kro-agent
 ```
 
 ## How to Verify

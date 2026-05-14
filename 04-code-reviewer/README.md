@@ -1,27 +1,30 @@
 # 04 - Claude Code as Code Reviewer
 
-An autonomous code review agent that runs on a CronJob, checks for open PRs, reviews them, and merges when appropriate.
+An autonomous code review agent that runs on a schedule, checks for open PRs, reviews them, and merges when appropriate.
 
-## Concept
+## Problem
 
-```
-┌─────────────────────────────────────────────────────────┐
-│ CronJob (every 4 hours)                                 │
-│                                                         │
-│  ┌─────────────────────────┐  ┌──────────────────────┐ │
-│  │ claude-code container   │  │ proxy sidecar        │ │
-│  │                         │  │                      │ │
-│  │ 1. Clone target repo    │  │ Injects:             │ │
-│  │ 2. List open PRs        │  │ - ANTHROPIC_API_KEY  │ │
-│  │ 3. Skip already reviewed│  │ - GH_TOKEN         │ │
-│  │ 4. Review new PRs       │  │                      │ │
-│  │ 5. Comment or merge     │  │                      │ │
-│  └─────────────────────────┘  └──────────────────────┘ │
-│                                                         │
-└─────────────────────────────────────────────────────────┘
-         │                              │
-         ▼                              ▼
-   GitHub (via gh CLI)          api.anthropic.com
+You want automated code reviews on every PR — checking for tests, security issues, and style — without human reviewers being a bottleneck. The agent needs GitHub access (to read PRs and post comments) and Anthropic API access (to reason about code).
+
+## Solution
+
+A Kubernetes CronJob runs Claude Code on a schedule. The transparent proxy handles credential injection — the agent uses `gh` CLI normally and the proxy injects the real `GH_TOKEN`. A ConfigMap delivers the review prompt and configuration.
+
+```mermaid
+flowchart LR
+    subgraph pod["CronJob Pod (every 4 hours)"]
+        direction LR
+        claude["claude-code<br/>1. Clone repo<br/>2. List open PRs<br/>3. Review + comment<br/>4. Merge if approved"]
+        proxy["proxy-sidecar<br/>credential-replace"]
+    end
+    claude -- "iptables" --> proxy
+    proxy -- "inject GH_TOKEN" --> gh["github.com"]
+    proxy -- "inject API key" --> api["api.anthropic.com"]
+
+    style claude fill:#e7f5ff,stroke:#1971c2,color:#1e1e1e
+    style proxy fill:#f8f0fc,stroke:#862e9c,color:#1e1e1e
+    style gh fill:#ebfbee,stroke:#2f9e44,color:#1e1e1e
+    style api fill:#ebfbee,stroke:#2f9e44,color:#1e1e1e
 ```
 
 ## Key Features
@@ -33,45 +36,45 @@ An autonomous code review agent that runs on a CronJob, checks for open PRs, rev
 
 ## Prerequisites
 
-- Kind cluster running (see [01-kind-cluster](../01-kind-cluster/))
-- Claude Code image loaded (see [02-claude-k8s-job](../02-claude-k8s-job/))
-- Proxy image loaded (see [03-sidecar-proxy](../03-sidecar-proxy/))
-- `.env` file with both `ANTHROPIC_API_KEY` and `GH_TOKEN` set
-- `TESTING_REPO` set in `.env` (see [Target Repo Setup](../README.md#target-repo-setup))
+- Kind cluster running with secrets (`make all` or see [01-kind-cluster](../01-kind-cluster/))
+- Both images built and loaded (`make build && make load`)
+- `.env` file with `ANTHROPIC_API_KEY`, `GH_TOKEN`, and `TESTING_REPO`
 
 ## Step-by-Step
 
-### 1. Create the Secret
+All commands run from the **project root**.
+
+### 1. Run with Make (recommended)
 
 ```bash
-kubectl create secret generic agent-credentials \
-  --from-env-file=../../.env \
-  -n 04-code-reviewer
+make run-04
+make logs-04         # Claude output
+make proxy-logs-04   # proxy ALLOWED/BLOCKED log
 ```
 
-### 2. Apply the ConfigMap and run the Job
-The set command must be run from inside manifest folder.
+### 2. Or manually
 
 ```bash
-set -a && source ../../.env && set +a
-envsubst '$TESTING_REPO' < manifests/configmap.yaml | kubectl apply -f -
-kubectl apply -f manifests/job.yaml
-```
+# Apply configmaps (substitute TESTING_REPO from .env)
+set -a && source .env && set +a
+envsubst '$TESTING_REPO' < 04-code-reviewer/manifests/configmap.yaml | kubectl apply -f -
+kubectl apply -f 04-code-reviewer/manifests/proxy-configmap.yaml
+kubectl apply -f 04-code-reviewer/manifests/job.yaml
 
-### 3. Watch the output
-
-```bash
+# Watch output
 kubectl logs -f job/claude-reviewer -c claude-code -n 04-code-reviewer
 ```
 
-### 4. Re-run (delete completed job and re-apply)
+### 3. Re-run
 
 ```bash
-kubectl delete job claude-reviewer -n 04-code-reviewer
-kubectl apply -f manifests/job.yaml
+make run-04
+# Or manually:
+kubectl delete job claude-reviewer -n 04-code-reviewer --ignore-not-found
+kubectl apply -f 04-code-reviewer/manifests/job.yaml
 ```
 
-> **Scheduled use**: `manifests/cronjob.yaml` is also provided if you want the reviewer to run automatically on a schedule (e.g., every 4 hours).
+> **Scheduled use**: `manifests/cronjob.yaml` runs the reviewer automatically (e.g., every 4 hours).
 
 ## How to Verify
 

@@ -5,15 +5,27 @@ apiVersion: kro.run/v1alpha1
 kind: ResourceGraphDefinition
 metadata:
   name: claudecodeagentsandbox
+  annotations:
+    kro.run/allow-breaking-changes: "true"
 spec:
   schema:
     apiVersion: v1alpha1
     kind: ClaudeCodeAgentSandbox
 
+    types:
+      Domain:
+        host: string | required=true
+        port: integer | default=443
+        action: 'string | default="credential-replace"'
+        inject_header: string | default=""
+        inject_auth: string | default=""
+        credential_env: string | default=""
+
     spec:
       agentName: string | required=true description="Display name for the agent (used in git commits)"
       agentEmail: string | default="claude-agent@bot.local" description="Git email for the agent"
       model: string | default="claude-haiku-4-5-20251001" description="Claude model to use"
+      logFormat: 'string | default="text" description="Log output format: text or json"'
       repo: string | required=true description="GitHub repository (owner/repo)"
       task: string | default="" description="Optional task description passed as AGENT_TASK env var"
       prompt: string | required=true description="Full agent prompt (mounted at /prompts/prompt.md)"
@@ -21,13 +33,30 @@ spec:
       sessionResume: boolean | default=false description="Enable session resume across runs"
       credentials:
         secretName: string | required=true description="Name of the Secret containing ANTHROPIC_API_KEY and GH_TOKEN"
+      proxy:
+        mode: 'string | default="strict" description="Proxy mode: strict, allow-everything, or block-unknown"'
+        domains: "[]Domain"
 
     status:
       configMapName: ${agentConfig.metadata.name}
+      proxyConfigName: ${proxyConfig.metadata.name}
 
   resources:
 
-    # --- 1. ConfigMap: entrypoint scripts and prompt ---
+    # --- 1. ConfigMap: proxy configuration (allowlist + cert validity) ---
+    - id: proxyConfig
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: ${schema.metadata.name}-proxy-config
+          namespace: ${schema.metadata.namespace}
+        data:
+          config.yaml: |-
+            mode: ${schema.spec.proxy.mode}
+            domains: ${json.marshal(schema.spec.proxy.domains)}
+
+    # --- 2. ConfigMap: entrypoint scripts and prompt ---
     - id: agentConfig
       template:
         apiVersion: v1
@@ -44,17 +73,9 @@ spec:
             git config --global user.email "${"${AGENT_GIT_EMAIL:-claude-agent@bot.local}"}"
             git config --global user.name "${"${AGENT_GIT_NAME:-Claude Agent}"}"
 
-            # Route only git and gh through the credential proxy (not all HTTPS traffic)
+            # Trust the proxy CA for MITM'd TLS connections
             if [ -f /certs/combined-ca.crt ]; then
-              git config --global http.proxy http://127.0.0.1:8080
               git config --global http.sslCAInfo /certs/combined-ca.crt
-              mkdir -p "$HOME/bin"
-              cat > "$HOME/bin/gh" << 'GHWRAPPER'
-            #!/bin/bash
-            exec env HTTPS_PROXY=http://127.0.0.1:8080 SSL_CERT_FILE=/certs/combined-ca.crt /usr/bin/gh "$@"
-            GHWRAPPER
-              chmod +x "$HOME/bin/gh"
-              export PATH="$HOME/bin:$PATH"
             fi
 
             # Build prompt: inject env vars as context, then append the prompt file
@@ -89,17 +110,22 @@ spec:
             RAW_LOG="/tmp/claude-raw-$(date +%s).jsonl"
             CLAUDE_EXIT=0
 
-            timeout 3600 claude $CLAUDE_ARGS -- "$PROMPT" \
-              | tee "$RAW_LOG" \
-              | jq --unbuffered -r '
-            if .type == "assistant" then
-              .message.content[]? |
-              if .type == "text" then ">>> " + .text[0:5000]
-              elif .type == "tool_use" then "[" + .name + "] " + ((.input | tostring)[0:3000])
-              else empty end
-            elif .type == "result" then
-              "[done] " + (.result // "complete")[0:5000]
-            else empty end' || CLAUDE_EXIT=$?
+            if [ "${"${LOG_FORMAT:-text}"}" = "json" ]; then
+              timeout 3600 claude $CLAUDE_ARGS -- "$PROMPT" \
+                | tee "$RAW_LOG" || CLAUDE_EXIT=$?
+            else
+              timeout 3600 claude $CLAUDE_ARGS -- "$PROMPT" \
+                | tee "$RAW_LOG" \
+                | jq --unbuffered -r '
+              if .type == "assistant" then
+                .message.content[]? |
+                if .type == "text" then ">>> " + .text[0:5000]
+                elif .type == "tool_use" then "[" + .name + "] " + ((.input | tostring)[0:3000])
+                else empty end
+              elif .type == "result" then
+                "[done] " + (.result // "complete")[0:5000]
+              else empty end' || CLAUDE_EXIT=$?
+            fi
 
             # Mark session for resume on next run
             if [ "${"${ENABLE_SESSION_RESUME:-}"}" = "true" ] && [ "$CLAUDE_EXIT" -eq 0 ]; then
@@ -135,7 +161,9 @@ spec:
 
             echo "Creating Runner: ${"${RUNNER_NAME}"}"
 
-            cat <<EOF | kubectl apply -f -
+            # Build Runner CR YAML with properly indented prompt
+            RUNNER_YAML="/tmp/runner-${"${RUNNER_NAME}"}.yaml"
+            cat > "${"${RUNNER_YAML}"}" <<HEADER
             apiVersion: kro.run/v1alpha1
             kind: ClaudeCodeAgentSandboxRunner
             metadata:
@@ -154,17 +182,24 @@ spec:
               agentName: "${"${AGENT_GIT_NAME}"}"
               agentEmail: "${"${AGENT_GIT_EMAIL}"}"
               model: "${"${ANTHROPIC_MODEL}"}"
+              logFormat: "${"${LOG_FORMAT:-text}"}"
               repo: "${"${TARGET_REPO}"}"
               task: "${"${AGENT_TASK}"}"
               prompt: |
-            $(sed 's/^/    /' /prompts/prompt.md)
+            HEADER
+            sed 's/^/                /' /prompts/prompt.md >> "${"${RUNNER_YAML}"}"
+            echo "" >> "${"${RUNNER_YAML}"}"
+            cat >> "${"${RUNNER_YAML}"}" <<FOOTER
               sessionResume: ${"${ENABLE_SESSION_RESUME:-false}"}
               workspacePvcName: "${"${WORKSPACE_PVC_NAME}"}"
               memoryPvcName: "${"${MEMORY_PVC_NAME}"}"
               configMapName: "${"${CONFIG_MAP_NAME}"}"
+              proxyConfigName: "${"${PROXY_CONFIG_NAME}"}"
               credentials:
                 secretName: "${"${CREDENTIALS_SECRET_NAME}"}"
-            EOF
+            FOOTER
+            kubectl apply -f "${"${RUNNER_YAML}"}"
+            rm -f "${"${RUNNER_YAML}"}"
 
             # Wait for sandbox pod to be running before attaching logs
             echo "Waiting for sandbox ${"${SANDBOX_NAME}"} to start..."
@@ -354,6 +389,8 @@ spec:
                           value: ${schema.spec.agentEmail}
                         - name: ANTHROPIC_MODEL
                           value: ${schema.spec.model}
+                        - name: LOG_FORMAT
+                          value: ${schema.spec.logFormat}
                         - name: TARGET_REPO
                           value: ${schema.spec.repo}
                         - name: AGENT_TASK
@@ -366,6 +403,8 @@ spec:
                           value: ${memoryPvc.metadata.name}
                         - name: CONFIG_MAP_NAME
                           value: ${agentConfig.metadata.name}
+                        - name: PROXY_CONFIG_NAME
+                          value: ${proxyConfig.metadata.name}
                         - name: CREDENTIALS_SECRET_NAME
                           value: ${schema.spec.credentials.secretName}
                       volumeMounts:

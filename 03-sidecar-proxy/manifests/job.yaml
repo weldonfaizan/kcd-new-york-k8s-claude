@@ -11,14 +11,65 @@ spec:
       volumes:
         - name: proxy-certs
           emptyDir: {}
+        - name: proxy-config
+          configMap:
+            name: proxy-config
 
-      # Native sidecar: starts before main containers, stops when they finish
       initContainers:
+        # 1. iptables: redirect all egress TCP to the proxy (runs once, exits)
+        # NOTE: PROXY_PORT must match the proxy-sidecar containerPort
+        - name: iptables-init
+          image: credential-proxy:latest
+          imagePullPolicy: Never
+          command: ["/bin/bash", "/app/iptables-init.sh"]
+          securityContext:
+            capabilities:
+              add: ["NET_ADMIN"]
+            runAsUser: 0
+            runAsNonRoot: false
+          env:
+            - name: PROXY_PORT
+              value: "15001"
+            # Must match proxy-sidecar runAsUser
+            - name: PROXY_UID
+              value: "1337"
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "10m"
+            limits:
+              memory: "64Mi"
+              cpu: "50m"
+
+        # 2. cert-init: generate ephemeral CA (runs once, exits)
+        - name: cert-init
+          image: credential-proxy:latest
+          imagePullPolicy: Never
+          command: ["/bin/bash", "/app/cert-init.sh"]
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+          volumeMounts:
+            - name: proxy-certs
+              mountPath: /certs
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "10m"
+            limits:
+              memory: "64Mi"
+              cpu: "50m"
+
+        # 3. Transparent proxy sidecar (runs for lifetime of pod)
         - name: proxy-sidecar
           image: credential-proxy:latest
           imagePullPolicy: Never
-          restartPolicy: Always   # This is what makes it a sidecar (K8s 1.29+)
+          restartPolicy: Always
+          securityContext:
+            runAsUser: 1337
           env:
+            - name: PROXY_PORT
+              value: "15001"
             - name: ANTHROPIC_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -33,8 +84,10 @@ spec:
           volumeMounts:
             - name: proxy-certs
               mountPath: /certs
+            - name: proxy-config
+              mountPath: /etc/proxy
           ports:
-            - containerPort: 8080
+            - containerPort: 15001
               protocol: TCP
           startupProbe:
             exec:
@@ -51,7 +104,6 @@ spec:
               cpu: "100m"
 
       containers:
-        # Main container: Claude Code with FAKE credentials only
         - name: claude-code
           image: claude-code:latest
           imagePullPolicy: Never
@@ -59,28 +111,37 @@ spec:
             - /bin/bash
             - -c
             - |
-              claude -p --dangerously-skip-permissions --verbose --output-format stream-json \
-                --model "${ANTHROPIC_MODEL}" -- "${PROMPT}" \
-                | jq --unbuffered -r '
-              if .type == "assistant" then
-                .message.content[]? |
-                if .type == "text" then ">>> " + .text[0:5000]
-                elif .type == "tool_use" then "[" + .name + "] " + ((.input | tostring)[0:3000])
-                else empty end
-              elif .type == "result" then
-                "[done] " + (.result // "complete")[0:5000]
-              else empty end'
+              if [ "${LOG_FORMAT}" = "json" ]; then
+                claude -p --dangerously-skip-permissions --verbose --output-format stream-json \
+                  --model "${ANTHROPIC_MODEL}" -- "${PROMPT}"
+              else
+                claude -p --dangerously-skip-permissions --verbose --output-format stream-json \
+                  --model "${ANTHROPIC_MODEL}" -- "${PROMPT}" \
+                  | jq --unbuffered -r '
+                if .type == "assistant" then
+                  .message.content[]? |
+                  if .type == "text" then ">>> " + .text[0:5000]
+                  elif .type == "tool_use" then "[" + .name + "] " + ((.input | tostring)[0:3000])
+                  else empty end
+                elif .type == "result" then
+                  "[done] " + (.result // "complete")[0:5000]
+                else empty end'
+              fi
           env:
             - name: ANTHROPIC_API_KEY
               value: "FAKE_KEY_REPLACED_BY_PROXY"
-            - name: ANTHROPIC_BASE_URL
-              value: "http://localhost:8080"
             - name: GH_TOKEN
               value: "FAKE_GH_TOKEN_REPLACED_BY_PROXY"
             - name: ANTHROPIC_MODEL
               value: "claude-haiku-4-5-20251001"
             - name: PROMPT
-              value: "Print all environment variables you can see"
+              value: "First, curl https://httpbin.org/get and show the response. Then try to curl https://example.com and show what happens. Finally, print your ANTHROPIC_API_KEY env var."
+            - name: LOG_FORMAT
+              value: "text"
+            - name: NODE_EXTRA_CA_CERTS
+              value: "/certs/proxy-ca.crt"
+            - name: SSL_CERT_FILE
+              value: "/certs/combined-ca.crt"
           volumeMounts:
             - name: proxy-certs
               mountPath: /certs

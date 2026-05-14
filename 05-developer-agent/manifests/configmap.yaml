@@ -6,6 +6,7 @@ metadata:
 data:
   TARGET_REPO: "${TESTING_REPO}"
   ANTHROPIC_MODEL: "claude-haiku-4-5-20251001"
+  LOG_FORMAT: "text"
   AGENT_GIT_EMAIL: "claude-developer@bot.local"
   AGENT_GIT_NAME: "Claude Developer"
   ENABLE_SESSION_RESUME: "true"
@@ -21,17 +22,9 @@ data:
     git config --global user.email "${AGENT_GIT_EMAIL:-claude-agent@bot.local}"
     git config --global user.name "${AGENT_GIT_NAME:-Claude Agent}"
 
-    # Route only git and gh through the credential proxy (not all HTTPS traffic)
+    # Trust the proxy CA for MITM'd TLS connections
     if [ -f /certs/combined-ca.crt ]; then
-      git config --global http.proxy http://127.0.0.1:8080
       git config --global http.sslCAInfo /certs/combined-ca.crt
-      mkdir -p "$HOME/bin"
-      cat > "$HOME/bin/gh" << 'GHWRAPPER'
-    #!/bin/bash
-    exec env HTTPS_PROXY=http://127.0.0.1:8080 SSL_CERT_FILE=/certs/combined-ca.crt /usr/bin/gh "$@"
-    GHWRAPPER
-      chmod +x "$HOME/bin/gh"
-      export PATH="$HOME/bin:$PATH"
     fi
 
     # Build prompt: inject env vars as context, then append the prompt file
@@ -65,17 +58,22 @@ data:
     RAW_LOG="/tmp/claude-raw-$(date +%s).jsonl"
     CLAUDE_EXIT=0
 
-    timeout 3600 claude $CLAUDE_ARGS -- "$PROMPT" \
-      | tee "$RAW_LOG" \
-      | jq --unbuffered -r '
-    if .type == "assistant" then
-      .message.content[]? |
-      if .type == "text" then ">>> " + .text[0:5000]
-      elif .type == "tool_use" then "[" + .name + "] " + ((.input | tostring)[0:3000])
-      else empty end
-    elif .type == "result" then
-      "[done] " + (.result // "complete")[0:5000]
-    else empty end' || CLAUDE_EXIT=$?
+    if [ "${LOG_FORMAT:-text}" = "json" ]; then
+      timeout 3600 claude $CLAUDE_ARGS -- "$PROMPT" \
+        | tee "$RAW_LOG" || CLAUDE_EXIT=$?
+    else
+      timeout 3600 claude $CLAUDE_ARGS -- "$PROMPT" \
+        | tee "$RAW_LOG" \
+        | jq --unbuffered -r '
+      if .type == "assistant" then
+        .message.content[]? |
+        if .type == "text" then ">>> " + .text[0:5000]
+        elif .type == "tool_use" then "[" + .name + "] " + ((.input | tostring)[0:3000])
+        else empty end
+      elif .type == "result" then
+        "[done] " + (.result // "complete")[0:5000]
+      else empty end' || CLAUDE_EXIT=$?
+    fi
 
     # Mark session for resume on next run
     if [ "${ENABLE_SESSION_RESUME:-}" = "true" ] && [ "$CLAUDE_EXIT" -eq 0 ]; then

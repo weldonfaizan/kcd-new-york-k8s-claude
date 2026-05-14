@@ -1,10 +1,42 @@
-# Platform Engineering for AI Agents: Secure Claude Code on Kubernetes with KRO
+# Platform Engineering for AI Agents: Secure Claude Code Agents on Kubernetes with KRO
 
 Reference implementation for the [KCD New York](https://community.cncf.io/kcd-new-york/) talk — June 10, 2026.
 
 ## What This Is
 
 A progressive, hands-on guide showing how to run Claude Code as an AI agent on Kubernetes — from a simple Job to a fully autonomous developer agent with credential isolation and persistent memory.
+
+```mermaid
+flowchart LR
+    subgraph concepts["Progressive Concepts"]
+        direction TB
+        c01["01 Kind Cluster"]
+        c02["02 Claude K8s Job"]
+        c03["03 Transparent Proxy"]
+        c04["04 Code Reviewer"]
+        c05["05 Developer Agent"]
+        c06["06 KRO Abstraction"]
+        c07["07 Sandbox Isolation"]
+    end
+    c01 --> c02 --> c03 --> c04 --> c05 --> c06 --> c07
+
+    subgraph infra["Shared Infrastructure"]
+        proxy["proxy/"]
+        cluster["Kind Cluster"]
+    end
+
+    concepts --> infra
+
+    style c01 fill:#f8f9fa,stroke:#495057,color:#1e1e1e
+    style c02 fill:#e7f5ff,stroke:#1971c2,color:#1e1e1e
+    style c03 fill:#f8f0fc,stroke:#862e9c,color:#1e1e1e
+    style c04 fill:#ebfbee,stroke:#2f9e44,color:#1e1e1e
+    style c05 fill:#ebfbee,stroke:#2f9e44,color:#1e1e1e
+    style c06 fill:#fff3bf,stroke:#e8590c,color:#1e1e1e
+    style c07 fill:#fff3bf,stroke:#e8590c,color:#1e1e1e
+    style proxy fill:#f8f0fc,stroke:#862e9c,color:#1e1e1e
+    style cluster fill:#f8f9fa,stroke:#495057,color:#1e1e1e
+```
 
 ## Prerequisites
 
@@ -70,22 +102,31 @@ See [ROADMAP.md](./ROADMAP.md) for planned future extensions.
 ```bash
 # 1. Set up credentials
 cp .env.example .env
-# Edit .env with your real API keys
+# Edit .env: add ANTHROPIC_API_KEY, GH_TOKEN, TESTING_REPO
 
-# 2. Create the Kind cluster
-cd 01-kind-cluster && bash scripts/create-cluster.sh && cd ..
+# 2. Build images, create cluster, load images (one command)
+make all
+# If Docker can't reach proxy.golang.org:
+# make all GOPROXY=direct
 
-# 3. Run your first Claude Code job
-cd 02-claude-k8s-job && bash scripts/build-and-load.sh
-source ../../.env
-kubectl create secret generic agent-credentials \
-  --from-literal=ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY -n 02-claude-k8s-job
-kubectl apply -f manifests/job.yaml
-kubectl logs -f job/claude-hello -n 02-claude-k8s-job
+# 3. Run your first Claude Code job (no proxy)
+kubectl apply -f 02-claude-k8s-job/manifests/job.yaml
+kubectl logs -f job/claude-hello -c claude-code -n 02-claude-k8s-job
+
+# 4. Run with transparent proxy + credential isolation
+make run-03
+make logs-03         # Claude output
+make proxy-logs-03   # see ALLOWED/BLOCKED connections
+
+# 5. Run the autonomous code reviewer
+make run-04
+make logs-04
 ```
+
+Run `make help` to see all available targets.
 
 ## Notes
 
-- All examples use `claude-haiku-4-5-20251001` model for cost efficiency. Change the model in manifests to use a different one.
-- The credential security pattern (sidecar proxy) is introduced in concept 03 and used in all subsequent concepts.
-- Target repo for PR operations is configured via `TESTING_REPO` in `.env` (see [Target Repo Setup](#target-repo-setup)).
+- All examples use `claude-haiku-4-5-20251001` model for cost efficiency
+- The transparent proxy ([proxy/](./proxy/)) is introduced in concept 03 and used in all subsequent concepts
+- Target repo for PR operations is configured via `TESTING_REPO` in `.env` (see [Target Repo Setup](#target-repo-setup))

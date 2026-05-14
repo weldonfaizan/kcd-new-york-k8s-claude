@@ -87,5 +87,16 @@ spec:
     - Total open PRs found
     - PRs skipped (already reviewed)
     - PRs reviewed: list each with action taken (changes requested / approved+merged)
+  proxy:
+    domains:
+      - host: api.anthropic.com
+        inject_header: x-api-key
+        credential_env: ANTHROPIC_API_KEY
+      - host: github.com
+        inject_auth: basic
+        credential_env: GH_TOKEN
+      - host: api.github.com
+        inject_auth: basic
+        credential_env: GH_TOKEN
   credentials:
     secretName: agent-credentials

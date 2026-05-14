@@ -10,6 +10,8 @@ Reference implementation for KCD New York 2026 talk: "Platform Engineering for A
 - Concepts are progressive — each builds on the previous
 - Each concept is self-contained with its own README and manifests
 - The numbered prefix is load-bearing — do not reorder
+- `proxy/` — standalone transparent credential proxy (Go binary, used by concepts 03-07)
+- Proxy Docker build: `make build-proxy` (from project root, builds `proxy/`)
 
 ## Conventions
 

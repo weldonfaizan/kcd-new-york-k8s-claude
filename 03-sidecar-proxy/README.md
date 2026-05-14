@@ -1,74 +1,59 @@
 # 03 - Sidecar Proxy for Credential Security
 
-Secure API credentials by keeping them out of the application container. A sidecar proxy intercepts outbound API calls and injects the real credentials — for both Anthropic and GitHub.
+Demonstrates the transparent proxy pattern: a sidecar intercepts all outbound traffic, replaces placeholder credentials with real ones, and enforces a domain allowlist.
 
 ## Concept
 
+```mermaid
+flowchart LR
+    subgraph pod["Pod Network Namespace"]
+        direction TB
+        subgraph init["Init Containers"]
+            direction LR
+            ip["iptables-init<br/><i>NET_ADMIN</i>"]
+            cert["cert-init<br/><i>Ephemeral CA</i>"]
+        end
+        subgraph runtime["Runtime Containers"]
+            direction LR
+            app["claude-code<br/>Connects to real URLs<br/>No proxy config"]
+            prx["proxy-sidecar<br/>UID 1337 · port 15001<br/>Real credentials"]
+        end
+        ip --> cert
+        app -- "iptables redirect" --> prx
+    end
+    prx -- "credential-replace" --> api["api.anthropic.com"]
+    prx -- "credential-replace" --> gh["github.com"]
+    prx -- "passthrough" --> hb["httpbin.org"]
+    prx -. "BLOCKED" .-> ex["example.com"]
+    api --> net(("Internet"))
+    gh --> net
+    hb --> net
+
+    style ip fill:#fff5f5,stroke:#e03131,color:#1e1e1e
+    style cert fill:#ebfbee,stroke:#2f9e44,color:#1e1e1e
+    style app fill:#e7f5ff,stroke:#1971c2,color:#1e1e1e
+    style prx fill:#f8f0fc,stroke:#862e9c,color:#1e1e1e
+    style api fill:#e7f5ff,stroke:#1971c2,color:#1e1e1e
+    style gh fill:#e7f5ff,stroke:#1971c2,color:#1e1e1e
+    style hb fill:#ebfbee,stroke:#2f9e44,color:#1e1e1e
+    style ex fill:#fff5f5,stroke:#e03131,color:#1e1e1e
+    style net fill:#f8f9fa,stroke:#495057,color:#1e1e1e
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│ Kubernetes Pod                                                   │
-│                                                                  │
-│  ┌────────────────────────────┐  ┌───────────────────────────┐  │
-│  │ claude-code container      │  │ proxy sidecar (port 8080) │  │
-│  │                            │  │                           │  │
-│  │ ANTHROPIC_API_KEY=FAKE     │  │ Has REAL credentials:     │  │
-│  │ GH_TOKEN=FAKE              │  │ ANTHROPIC_API_KEY=sk-ant… │  │
-│  │                            │  │ GH_TOKEN=ghp_…            │  │
-│  │ ANTHROPIC_BASE_URL=        │  │                           │  │
-│  │   http://localhost:8080    │  │ Mode 1: Plain HTTP        │  │
-│  │ HTTPS_PROXY=               │  │   → Anthropic API         │  │
-│  │   http://localhost:8080    │  │   (inject x-api-key)      │  │
-│  │ NO_PROXY=localhost         │  │                           │  │
-│  │                            │  │ Mode 2: CONNECT + MITM    │  │
-│  │ Trusts proxy CA cert       │  │   → github.com            │  │
-│  │ from /certs/proxy-ca.crt   │  │   → api.github.com        │  │
-│  └────────────────────────────┘  │   (replace Authorization) │  │
-│                                  └───────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
-```
 
-### Traffic Flows
+## What It Does
 
-1. **Claude SDK → Anthropic API** (plain HTTP reverse proxy):
-   - SDK reads `ANTHROPIC_BASE_URL=http://localhost:8080`
-   - Sends plain HTTP to proxy → proxy injects `x-api-key` → forwards to `https://api.anthropic.com`
-   - `NO_PROXY=localhost` prevents `HTTPS_PROXY` from applying here
+- The main container connects to real URLs (`https://api.anthropic.com`) — no `HTTPS_PROXY`, no `ANTHROPIC_BASE_URL`
+- iptables transparently redirects all egress TCP to the proxy
+- The proxy identifies destinations via TLS SNI and replaces placeholder credentials with real ones from the sidecar's environment
+- Domains not in the list are blocked (default `strict` mode)
 
-2. **`gh` CLI → GitHub API** (HTTPS CONNECT + MITM):
-   - `HTTPS_PROXY=http://localhost:8080` → gh sends `CONNECT api.github.com:443`
-   - Proxy terminates TLS with ephemeral cert signed by proxy CA
-   - Reads `Authorization: token FAKE…` → replaces with real token → forwards to upstream
+The proxy can only detect HTTP and HTTPS destinations. Raw TCP protocols like SSH, PostgreSQL, and Redis cannot be identified by hostname — for those, use `allow-everything` mode combined with Kubernetes NetworkPolicy (see [08-network-policy](../08-network-policy/)).
 
-3. **`git` → GitHub** (HTTPS CONNECT + MITM):
-   - Same HTTPS_PROXY flow → `CONNECT github.com:443`
-   - Proxy replaces Basic auth password with real token → forwards to upstream
+For full proxy documentation, configuration options, and operating modes, see [proxy/](../proxy/).
 
-## Why This Matters
+## Why Not HTTPS_PROXY?
 
-In concept 02, credentials are directly available as environment variables. This means:
-- Anyone with `kubectl exec` access can read them
-- They appear in `kubectl describe pod` output
-- They can leak into logs if the application prints env vars
-- Container runtime inspection reveals them
-
-With the sidecar proxy pattern:
-- The main container only has fake/sentinel values for ALL credentials
-- Real keys exist only in the sidecar container's memory
-- The sidecar is a minimal, auditable component
-- CONNECT requests are allowlisted (only `github.com` and `api.github.com`)
-
-### Ephemeral Certificate Lifecycle
-
-1. Sidecar starts first (native K8s sidecar via `restartPolicy: Always`)
-2. `entrypoint.sh` generates a CA + server cert with `openssl` (1-day validity)
-3. CA cert is written to a shared `emptyDir` volume at `/certs/proxy-ca.crt`
-4. Main container starts, trusts the CA via `SSL_CERT_FILE` / `GIT_SSL_CAINFO` / `NODE_EXTRA_CA_CERTS`
-5. Certs are ephemeral — fresh per pod, nothing baked into images or committed to the repo
-
-## Reference Projects
-
-- [agentsecrets](https://github.com/The-17/agentsecrets) — Proxy that replaces sentinel values with real credentials
-- [wardgate](https://github.com/wardgate/wardgate) — Gateway for securing AI agent credentials
+The `HTTPS_PROXY` / `NO_PROXY` ecosystem is [fragmented and inconsistent](https://about.gitlab.com/blog/we-need-to-talk-no-proxy/). A transparent iptables-based proxy works at the kernel level — zero application configuration required.
 
 ## Prerequisites
 
@@ -76,61 +61,35 @@ With the sidecar proxy pattern:
 - Claude Code image loaded (see [02-claude-k8s-job](../02-claude-k8s-job/))
 - `.env` file with `ANTHROPIC_API_KEY` set (and optionally `GH_TOKEN`)
 
-## Step-by-Step
-
-### 1. Build the proxy image
+## Run
 
 ```bash
-docker build -t credential-proxy:latest proxy/
-kind load docker-image credential-proxy:latest --name claude-demo
+make build-proxy && make load-proxy
+make run-03
+make logs-03         # Claude output
+make proxy-logs-03   # proxy ALLOWED/BLOCKED log
 ```
 
-### 2. Create the Secret (real keys for sidecar only)
+## Domain Configuration
 
-```bash
-kubectl create secret generic agent-credentials \
-  --from-env-file=../../.env \
-  -n 03-sidecar-proxy
+Edit `manifests/configmap.yaml` — only `host` and injection method are required (port defaults to 443, action defaults to credential-replace):
+
+```yaml
+domains:
+  - host: api.anthropic.com
+    inject_header: x-api-key
+    credential_env: ANTHROPIC_API_KEY
+
+  - host: github.com
+    inject_auth: basic
+    credential_env: GH_TOKEN
+
+  - host: httpbin.org
+    action: passthrough
 ```
-
-### 3. Run the Job
-
-```bash
-kubectl apply -f manifests/job.yaml
-```
-
-### 4. Watch the output
-
-```bash
-kubectl logs -f job/claude-hello-secure -c claude-code -n 03-sidecar-proxy
-```
-
-## How to Verify
-
-Exec into the main container and check the environment — you should only see fake values:
-
-```bash
-kubectl exec job/claude-hello-secure -c claude-code -n 03-sidecar-proxy -- env | grep -E 'ANTHROPIC_API_KEY|GH_TOKEN'
-```
-
-Expected:
-```
-ANTHROPIC_API_KEY=FAKE_KEY_REPLACED_BY_PROXY
-GH_TOKEN=FAKE_GH_TOKEN_REPLACED_BY_PROXY
-```
-
-The real keys only exist in the sidecar:
-```bash
-kubectl exec job/claude-hello-secure -c proxy-sidecar -n 03-sidecar-proxy -- env | grep -E 'ANTHROPIC|GH_TOKEN'
-```
-
-## Expected Output
-
-Claude Code should work normally (the proxy transparently injects the real key), but the main container never has access to real credentials.
 
 ## Cleanup
 
 ```bash
-kubectl delete -f manifests/job.yaml
-kubectl delete secret agent-credentials -n 03-sidecar-proxy
+make clean-03
 ```
