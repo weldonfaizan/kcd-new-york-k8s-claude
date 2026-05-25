@@ -278,6 +278,7 @@ spec:
           workspacePvcName: ${workspacePvc.metadata.name}
           memoryPvcName: ${memoryPvc.metadata.name}
           configMapName: ${agentConfig.metadata.name}
+          proxyConfigName: ${proxyConfig.metadata.name}
           credentials:
             secretName: ${schema.spec.credentials.secretName}
 
