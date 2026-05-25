@@ -18,8 +18,9 @@ Reference implementation for KCD New York 2026 talk: "Platform Engineering for A
 - Kubernetes manifests: lowercase-hyphenated filenames (e.g., `cronjob.yaml`)
 - Shell scripts: `*.sh` with shebang `#!/bin/bash` and `set -e`
 - Each concept uses its own namespace matching the folder name (e.g., `02-claude-k8s-job`, `03-sidecar-proxy`)
-- Secret name: `agent-credentials` in all namespaces (contains `ANTHROPIC_API_KEY` + `GH_TOKEN`)
-- Claude Code flags: `-p --dangerously-skip-permissions --verbose --output-format stream-json --model claude-haiku-4-5-20251001`
+- Secret name: `agent-credentials` in all namespaces (contains `GH_TOKEN`; also `ANTHROPIC_API_KEY` in api-key mode)
+- Claude Code flags: `-p --dangerously-skip-permissions --verbose --output-format stream-json --model ${ANTHROPIC_MODEL}`
+- Model set via `ANTHROPIC_MODEL` in `.env` — Bedrock: `us.anthropic.claude-haiku-4-5-20251001-v1:0`, API-key: `claude-haiku-4-5-20251001`
 - Never commit real credentials — use `REPLACE_ME` placeholders in manifests
 - Real credentials go in `.env` (gitignored), loaded via `source .env`
 
@@ -29,7 +30,27 @@ Reference implementation for KCD New York 2026 talk: "Platform Engineering for A
 - Creates Kind cluster `claude-demo` (skips if exists)
 - Creates all concept namespaces
 - Creates/recreates `agent-credentials` secret in all namespaces from `.env`
-- Re-run anytime to refresh secrets after editing `.env`
+- Re-run anytime to refresh secrets or restart the metadata server
+
+### Authentication Modes
+
+Controlled by `AUTH_MODE` env var (default: `bedrock`):
+
+- **`bedrock`** (default): Uses `aws-vault --ec2-server` to expose an EC2 metadata endpoint. Pods get temporary AWS credentials automatically and authenticate to Claude via Amazon Bedrock. Requires `aws-vault`, `socat`, and a profile with `bedrock:InvokeModel` permissions. Pods must set `CLAUDE_CODE_USE_BEDROCK=1` and `AWS_REGION=us-west-2`.
+- **`api-key`**: Injects `ANTHROPIC_API_KEY` from `.env` into Kubernetes Secrets (original behavior).
+
+```bash
+# Default (Bedrock)
+bash 01-kind-cluster/scripts/create-cluster.sh
+
+# API key mode
+AUTH_MODE=api-key bash 01-kind-cluster/scripts/create-cluster.sh
+
+# Custom aws-vault profile
+AWS_VAULT_PROFILE=my-profile bash 01-kind-cluster/scripts/create-cluster.sh
+```
+
+The Bedrock metadata server dies when the terminal closes — re-run the script to restart.
 
 ## Log Output
 
@@ -63,6 +84,25 @@ Each concept README follows: Concept Summary, Prerequisites, Step-by-Step, How t
 
 ## Testing
 
+### E2E Test Suite
+
+```bash
+make test          # Run all tests (02, 03, 06, 07)
+make test-02       # Simple job
+make test-03       # Sidecar proxy
+make test-06       # KRO agent (requires KRO installed)
+make test-07       # Sandbox (requires KRO + agent-sandbox CRD)
+```
+
+Tests 06 and 07 gracefully SKIP if their CRDs aren't installed. Each test creates a job, waits for completion, and prints output summary.
+
+Prerequisites for full suite:
+- Cluster running: `make all` (builds images, creates cluster, loads images)
+- KRO installed: `helm install kro oci://registry.k8s.io/kro/charts/kro --namespace kro-system --create-namespace`
+- Agent-sandbox installed (for test-07): see `07-sandbox/README.md` step 3
+
+### Feature Cycle Testing (concepts 04-05)
+
 - Template repo: `csantanapr/kcd-nyc-hello-template` (public, GitHub template) — audience forks this
 - Target repo configured via `TESTING_REPO` env var in `.env`, injected into manifests via `envsubst`
 - Kind cluster name: `claude-demo`
@@ -70,15 +110,17 @@ Each concept README follows: Concept Summary, Prerequisites, Step-by-Step, How t
 
 ## envsubst Pattern
 
-Manifests use `${TESTING_REPO}` placeholder. Apply with:
+Manifests use `${TESTING_REPO}`, `${CLAUDE_CODE_USE_BEDROCK}`, `${AWS_REGION}`, `${ANTHROPIC_API_KEY_PLACEHOLDER}`, and `${ANTHROPIC_MODEL}` placeholders. Apply with:
 
 ```bash
 set -a && source .env && set +a
-envsubst '$TESTING_REPO' < manifests/configmap.yaml | kubectl apply -f -
+envsubst '$TESTING_REPO $CLAUDE_CODE_USE_BEDROCK $AWS_REGION $ANTHROPIC_API_KEY_PLACEHOLDER $ANTHROPIC_MODEL' < manifests/job.yaml | kubectl apply -f -
 ```
 
 - `set -a` exports all `.env` vars so `envsubst` can see them
-- `'$TESTING_REPO'` restricts substitution to only that variable — embedded `${TARGET_REPO}` shell refs in ConfigMap scripts are preserved
+- Restrict substitution to listed variables — embedded `${TARGET_REPO}` shell refs in ConfigMap scripts are preserved
+- Bedrock mode: `CLAUDE_CODE_USE_BEDROCK=1`, `AWS_REGION=us-west-2`, `ANTHROPIC_API_KEY_PLACEHOLDER=`
+- API-key mode: `CLAUDE_CODE_USE_BEDROCK=`, `AWS_REGION=`, `ANTHROPIC_API_KEY_PLACEHOLDER=FAKE_KEY_REPLACED_BY_PROXY`
 
 ## Feature Cycle (developer + reviewer agents)
 

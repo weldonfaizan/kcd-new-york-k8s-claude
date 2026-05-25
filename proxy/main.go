@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
 	"syscall"
@@ -99,6 +100,15 @@ func main() {
 	for _, e := range config.Domains {
 		fmt.Printf("  %s:%d [%s]\n", e.Host, e.Port, e.Action)
 	}
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		<-sig
+		fmt.Println("Shutting down proxy")
+		ln.Close()
+		os.Exit(0)
+	}()
 
 	for {
 		conn, err := ln.Accept()

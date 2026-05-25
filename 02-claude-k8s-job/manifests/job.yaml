@@ -33,8 +33,12 @@ spec:
                 else empty end'
               fi
           env:
+            - name: CLAUDE_CODE_USE_BEDROCK
+              value: "${CLAUDE_CODE_USE_BEDROCK}"
+            - name: AWS_REGION
+              value: "${AWS_REGION}"
             - name: ANTHROPIC_MODEL
-              value: "claude-haiku-4-5-20251001"
+              value: "${ANTHROPIC_MODEL}"
             - name: PROMPT
               value: "Print all environment variables you can see"
             - name: LOG_FORMAT

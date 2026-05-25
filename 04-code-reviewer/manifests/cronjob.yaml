@@ -45,6 +45,7 @@ spec:
                     secretKeyRef:
                       name: agent-credentials
                       key: ANTHROPIC_API_KEY
+                      optional: true
                 - name: GH_TOKEN
                   valueFrom:
                     secretKeyRef:
@@ -76,8 +77,12 @@ spec:
               imagePullPolicy: Never
               command: ["/bin/bash", "/scripts/entrypoint.sh"]
               env:
+                - name: CLAUDE_CODE_USE_BEDROCK
+                  value: "${CLAUDE_CODE_USE_BEDROCK}"
+                - name: AWS_REGION
+                  value: "${AWS_REGION}"
                 - name: ANTHROPIC_API_KEY
-                  value: "FAKE_KEY_REPLACED_BY_PROXY"
+                  value: "${ANTHROPIC_API_KEY_PLACEHOLDER}"
                 - name: ANTHROPIC_BASE_URL
                   value: "http://localhost:8080"
                 - name: GH_TOKEN

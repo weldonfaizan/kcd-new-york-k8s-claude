@@ -44,7 +44,9 @@ flowchart LR
 - [kind](https://kind.sigs.k8s.io/) (Kubernetes in Docker)
 - kubectl
 - `envsubst` (included with `gettext` — pre-installed on most systems)
-- An Anthropic API key (`ANTHROPIC_API_KEY`)
+- **Auth (choose one):**
+  - **Bedrock (default):** `aws-vault`, `socat`, AWS profile with Bedrock invoke permissions
+  - **API key:** An Anthropic API key (`ANTHROPIC_API_KEY`)
 - A GitHub PAT with write access to your target repo (see [Target Repo Setup](#target-repo-setup))
 
 ## Setup
@@ -93,7 +95,7 @@ envsubst '$TESTING_REPO' < manifests/configmap.yaml | kubectl apply -f -
 | 04 | [Code Reviewer](./04-code-reviewer/) | Autonomous PR reviewer running on a CronJob |
 | 05 | [Developer Agent](./05-developer-agent/) | Autonomous developer with persistent memory and session resume |
 | 06 | [KRO Agent](./06-kro-agent/) | One CRD to rule them all — KRO abstracts the full agent pattern |
-| 07 | [Agent Sandbox](./07-sandbox/agent-sandbox/) | Process-level isolation via `kubernetes-sigs/agent-sandbox` — sandbox-only or CronJob + execution sandbox |
+| 07 | [Agent Sandbox](./07-sandbox/) | Process-level isolation via `kubernetes-sigs/agent-sandbox` — sandbox-only or CronJob + execution sandbox |
 
 See [ROADMAP.md](./ROADMAP.md) for planned future extensions.
 
@@ -102,16 +104,16 @@ See [ROADMAP.md](./ROADMAP.md) for planned future extensions.
 ```bash
 # 1. Set up credentials
 cp .env.example .env
-# Edit .env: add ANTHROPIC_API_KEY, GH_TOKEN, TESTING_REPO
+# Edit .env: add GH_TOKEN, TESTING_REPO
+# For Bedrock (default): CLAUDE_CODE_USE_BEDROCK=1, AWS_REGION=us-west-2 are pre-set
+# For API key: uncomment ANTHROPIC_API_KEY and set it
 
 # 2. Build images, create cluster, load images (one command)
 make all
-# If Docker can't reach proxy.golang.org:
-# make all GOPROXY=direct
 
 # 3. Run your first Claude Code job (no proxy)
-kubectl apply -f 02-claude-k8s-job/manifests/job.yaml
-kubectl logs -f job/claude-hello -c claude-code -n 02-claude-k8s-job
+make run-02
+make logs-02
 
 # 4. Run with transparent proxy + credential isolation
 make run-03
@@ -125,8 +127,29 @@ make logs-04
 
 Run `make help` to see all available targets.
 
+## E2E Tests
+
+Run the full test suite to verify all concepts work end-to-end:
+
+```bash
+make test            # All tests (02, 03, 06, 07)
+make test-02         # Simple job
+make test-03         # Sidecar proxy
+make test-06         # KRO agent (skips if KRO not installed)
+make test-07         # Sandbox (skips if agent-sandbox CRD not installed)
+```
+
+For the full suite, install KRO and agent-sandbox first:
+
+```bash
+helm install kro oci://registry.k8s.io/kro/charts/kro --namespace kro-system --create-namespace
+VERSION=$(curl -s https://api.github.com/repos/kubernetes-sigs/agent-sandbox/releases/latest | grep tag_name | cut -d'"' -f4)
+kubectl apply -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/manifest.yaml"
+```
+
 ## Notes
 
-- All examples use `claude-haiku-4-5-20251001` model for cost efficiency
+- Default auth is **Amazon Bedrock** via workload identity (EC2 metadata) — no API key needed
+- Model ID is set in `.env`: `us.anthropic.claude-haiku-4-5-20251001-v1:0` (Bedrock) or `claude-haiku-4-5-20251001` (API key)
 - The transparent proxy ([proxy/](./proxy/)) is introduced in concept 03 and used in all subsequent concepts
 - Target repo for PR operations is configured via `TESTING_REPO` in `.env` (see [Target Repo Setup](#target-repo-setup))

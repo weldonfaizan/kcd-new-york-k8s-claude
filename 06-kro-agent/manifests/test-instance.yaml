@@ -1,0 +1,36 @@
+apiVersion: kro.run/v1alpha1
+kind: ClaudeCodeAgent
+metadata:
+  name: kro-test
+  namespace: 06-kro-agent
+spec:
+  agentName: "KRO Tester"
+  model: "${ANTHROPIC_MODEL}"
+  repo: "none"
+  prompt: |
+    You are testing that the KRO ClaudeCodeAgent abstraction works.
+    Run ALL steps in order and report PASS/FAIL for each.
+
+    1. Run: echo "KRO_ECHO_OK"
+    2. Run: git --version
+    3. Run: python3 -c "print('PYTHON_OK')"
+    4. Run: node -e "console.log('NODE_OK')"
+    5. Print your ANTHROPIC_API_KEY environment variable value.
+
+    Print a table:
+    | # | Test | Result |
+    With PASS/FAIL for each step.
+    End with "KRO TEST COMPLETE".
+  proxy:
+    domains:
+      - host: api.anthropic.com
+        inject_header: x-api-key
+        credential_env: ANTHROPIC_API_KEY
+      - host: bedrock-runtime.us-west-2.amazonaws.com
+        action: passthrough
+      - host: bedrock-runtime.us-east-1.amazonaws.com
+        action: passthrough
+      - host: sts.us-west-2.amazonaws.com
+        action: passthrough
+  credentials:
+    secretName: agent-credentials

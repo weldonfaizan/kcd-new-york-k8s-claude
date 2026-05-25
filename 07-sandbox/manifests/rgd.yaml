@@ -24,6 +24,7 @@ spec:
     spec:
       agentName: string | required=true description="Display name for the agent (used in git commits)"
       agentEmail: string | default="claude-agent@bot.local" description="Git email for the agent"
+      authMode: 'string | default="bedrock" description="Auth mode: bedrock (workload identity) or api-key (proxy credential injection)"'
       model: string | default="claude-haiku-4-5-20251001" description="Claude model to use"
       logFormat: 'string | default="text" description="Log output format: text or json"'
       repo: string | required=true description="GitHub repository (owner/repo)"
@@ -32,7 +33,7 @@ spec:
       schedule: string | default="" description="Cron schedule (empty = one-shot Sandbox, set = CronJob orchestrator)"
       sessionResume: boolean | default=false description="Enable session resume across runs"
       credentials:
-        secretName: string | required=true description="Name of the Secret containing ANTHROPIC_API_KEY and GH_TOKEN"
+        secretName: string | required=true description="Name of the Secret containing GH_TOKEN (and ANTHROPIC_API_KEY if authMode is api-key)"
       proxy:
         mode: 'string | default="strict" description="Proxy mode: strict, allow-everything, or block-unknown"'
         domains: "[]Domain"
@@ -181,6 +182,7 @@ spec:
             spec:
               agentName: "${"${AGENT_GIT_NAME}"}"
               agentEmail: "${"${AGENT_GIT_EMAIL}"}"
+              authMode: "${"${AUTH_MODE:-bedrock}"}"
               model: "${"${ANTHROPIC_MODEL}"}"
               logFormat: "${"${LOG_FORMAT:-text}"}"
               repo: "${"${TARGET_REPO}"}"
@@ -270,6 +272,7 @@ spec:
         spec:
           agentName: ${schema.spec.agentName}
           agentEmail: ${schema.spec.agentEmail}
+          authMode: ${schema.spec.authMode}
           model: ${schema.spec.model}
           repo: ${schema.spec.repo}
           task: ${schema.spec.task}
@@ -406,6 +409,8 @@ spec:
                           value: ${agentConfig.metadata.name}
                         - name: PROXY_CONFIG_NAME
                           value: ${proxyConfig.metadata.name}
+                        - name: AUTH_MODE
+                          value: ${schema.spec.authMode}
                         - name: CREDENTIALS_SECRET_NAME
                           value: ${schema.spec.credentials.secretName}
                       volumeMounts:
