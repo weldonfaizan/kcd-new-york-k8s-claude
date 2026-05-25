@@ -5,7 +5,7 @@ metadata:
   namespace: 05-developer-agent
 data:
   TARGET_REPO: "${TESTING_REPO}"
-  ANTHROPIC_MODEL: "claude-haiku-4-5-20251001"
+  ANTHROPIC_MODEL: "${ANTHROPIC_MODEL}"
   LOG_FORMAT: "text"
   AGENT_GIT_EMAIL: "claude-developer@bot.local"
   AGENT_GIT_NAME: "Claude Developer"

@@ -5,6 +5,7 @@ metadata:
   namespace: 07-sandbox
 spec:
   agentName: "Sandbox Tester"
+  model: "${ANTHROPIC_MODEL}"
   repo: "none"
   prompt: |
     You are testing that sandbox isolation works end-to-end.
@@ -55,5 +56,11 @@ spec:
       - host: api.anthropic.com
         inject_header: x-api-key
         credential_env: ANTHROPIC_API_KEY
+      - host: bedrock-runtime.us-west-2.amazonaws.com
+        action: passthrough
+      - host: bedrock-runtime.us-east-1.amazonaws.com
+        action: passthrough
+      - host: sts.us-west-2.amazonaws.com
+        action: passthrough
   credentials:
     secretName: agent-credentials

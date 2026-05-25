@@ -17,3 +17,12 @@ data:
       - host: api.github.com
         inject_auth: basic
         credential_env: GH_TOKEN
+
+      - host: bedrock-runtime.us-west-2.amazonaws.com
+        action: passthrough
+
+      - host: bedrock-runtime.us-east-1.amazonaws.com
+        action: passthrough
+
+      - host: sts.us-west-2.amazonaws.com
+        action: passthrough

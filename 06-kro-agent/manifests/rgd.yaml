@@ -21,6 +21,7 @@ spec:
     spec:
       agentName: string | required=true description="Display name for the agent (used in git commits)"
       agentEmail: string | default="claude-agent@bot.local" description="Git email for the agent"
+      authMode: 'string | default="bedrock" description="Auth mode: bedrock (workload identity) or api-key (proxy credential injection)"'
       model: string | default="claude-haiku-4-5-20251001" description="Claude model to use"
       logFormat: 'string | default="text" description="Log output format: text or json"'
       repo: string | required=true description="GitHub repository (owner/repo)"
@@ -29,7 +30,7 @@ spec:
       schedule: string | default="" description="Cron schedule (empty = one-shot Job, cron = CronJob)"
       sessionResume: boolean | default=false description="Enable session resume across runs"
       credentials:
-        secretName: string | required=true description="Name of the Secret containing ANTHROPIC_API_KEY and GH_TOKEN"
+        secretName: string | required=true description="Name of the Secret containing GH_TOKEN (and ANTHROPIC_API_KEY if authMode is api-key)"
       proxy:
         mode: 'string | default="strict" description="Proxy mode: strict, allow-everything, or block-unknown"'
         domains: "[]Domain"
@@ -277,6 +278,7 @@ spec:
                         secretKeyRef:
                           name: ${schema.spec.credentials.secretName}
                           key: ANTHROPIC_API_KEY
+                          optional: true
                     - name: GH_TOKEN
                       valueFrom:
                         secretKeyRef:
@@ -310,8 +312,12 @@ spec:
                   imagePullPolicy: Never
                   command: ["/bin/bash", "/scripts/entrypoint.sh"]
                   env:
+                    - name: CLAUDE_CODE_USE_BEDROCK
+                      value: '${schema.spec.authMode == "bedrock" ? "1" : ""}'
+                    - name: AWS_REGION
+                      value: '${schema.spec.authMode == "bedrock" ? "us-west-2" : ""}'
                     - name: ANTHROPIC_API_KEY
-                      value: "FAKE_KEY_REPLACED_BY_PROXY"
+                      value: '${schema.spec.authMode == "api-key" ? "FAKE_KEY_REPLACED_BY_PROXY" : ""}'
                     - name: GH_TOKEN
                       value: "FAKE_GH_TOKEN_REPLACED_BY_PROXY"
                     - name: NODE_EXTRA_CA_CERTS

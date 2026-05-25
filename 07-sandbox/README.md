@@ -128,10 +128,10 @@ kind load docker-image bitnami/kubectl:latest --name claude-demo
 The Runner RGD must be applied **first** (the parent references its CRD):
 
 ```bash
-kubectl apply -f 07-sandbox/agent-sandbox/manifests/rgd-runner.yaml
+kubectl apply -f 07-sandbox/manifests/rgd-runner.yaml
 kubectl wait --for=condition=Ready rgd/claudecodeagentsandboxrunner --timeout=30s
 
-kubectl apply -f 07-sandbox/agent-sandbox/manifests/rgd.yaml
+kubectl apply -f 07-sandbox/manifests/rgd.yaml
 kubectl wait --for=condition=Ready rgd/claudecodeagentsandbox --timeout=30s
 ```
 
@@ -146,7 +146,7 @@ kubectl get crd claudecodeagentsandboxrunners.kro.run claudecodeagentsandboxes.k
 Claude Code runs directly inside a Sandbox with full Bash:
 
 ```bash
-kubectl apply -f 07-sandbox/agent-sandbox/manifests/test-standalone.yaml
+kubectl apply -f 07-sandbox/manifests/test-standalone.yaml
 ```
 
 Wait for the Sandbox to be ready, then stream logs:
@@ -200,7 +200,7 @@ kubectl delete claudecodeagentsandbox sandbox-test -n 07-sandbox
 Tests the full orchestrator flow: CronJob → creates Runner → Sandbox runs → logs streamed → cleanup:
 
 ```bash
-kubectl apply -f 07-sandbox/agent-sandbox/manifests/test-cronjob.yaml
+kubectl apply -f 07-sandbox/manifests/test-cronjob.yaml
 ```
 
 Verify the CronJob resources:
@@ -260,7 +260,7 @@ One-shot agent that runs directly inside a Sandbox:
 
 ```bash
 set -a && source .env && set +a
-envsubst '$TESTING_REPO' < 07-sandbox/agent-sandbox/manifests/developer-instance.yaml | kubectl apply -f -
+envsubst '$TESTING_REPO' < 07-sandbox/manifests/developer-instance.yaml | kubectl apply -f -
 ```
 
 Watch it work:
@@ -275,7 +275,7 @@ kubectl logs -f claude-developer-sandbox -c claude-code -n 07-sandbox
 Scheduled agent that creates a fresh Sandbox on each run:
 
 ```bash
-envsubst '$TESTING_REPO' < 07-sandbox/agent-sandbox/manifests/reviewer-instance.yaml | kubectl apply -f -
+envsubst '$TESTING_REPO' < 07-sandbox/manifests/reviewer-instance.yaml | kubectl apply -f -
 ```
 
 Trigger manually:
@@ -295,7 +295,7 @@ The developer and reviewer work together:
 ```bash
 # Run developer (standalone — addresses all PRs in one run)
 set -a && source .env && set +a
-envsubst '$TESTING_REPO' < 07-sandbox/agent-sandbox/manifests/developer-instance.yaml | kubectl apply -f -
+envsubst '$TESTING_REPO' < 07-sandbox/manifests/developer-instance.yaml | kubectl apply -f -
 kubectl wait --for=condition=Ready sandbox/claude-developer-sandbox -n 07-sandbox --timeout=60s
 kubectl logs -f claude-developer-sandbox -c claude-code -n 07-sandbox
 
@@ -312,8 +312,8 @@ kubectl delete claudecodeagentsandbox claude-developer claude-reviewer sandbox-t
 kubectl delete job sandbox-test-cron-manual claude-reviewer-manual -n 07-sandbox --ignore-not-found
 
 # Delete both RGDs
-kubectl delete -f 07-sandbox/agent-sandbox/manifests/rgd.yaml
-kubectl delete -f 07-sandbox/agent-sandbox/manifests/rgd-runner.yaml
+kubectl delete -f 07-sandbox/manifests/rgd.yaml
+kubectl delete -f 07-sandbox/manifests/rgd-runner.yaml
 
 # Uninstall agent-sandbox controller
 VERSION=$(curl -s https://api.github.com/repos/kubernetes-sigs/agent-sandbox/releases/latest | grep tag_name | cut -d'"' -f4)
