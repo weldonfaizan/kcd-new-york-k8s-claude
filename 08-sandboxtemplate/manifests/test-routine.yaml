@@ -1,0 +1,18 @@
+# Test: create a recurring routine that dispatches work on a schedule
+apiVersion: kro.run/v1alpha1
+kind: ClaudeCodeAgentRoutine
+metadata:
+  name: test-routine
+  namespace: 08-sandboxtemplate
+spec:
+  templateName: claude-template
+  schedule: "*/30 * * * *"
+  agentName: "Routine Test Agent"
+  repo: "csantanapr/kcd-nyc-hello-template"
+  prompt: |
+    You are a recurring agent running on a schedule.
+
+    Run: echo "ROUTINE_RUN at $(date)"
+    Report success.
+
+    End with "ROUTINE TEST COMPLETE".

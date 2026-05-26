@@ -1,0 +1,20 @@
+# Test: dispatch a one-shot task to the pool
+apiVersion: kro.run/v1alpha1
+kind: ClaudeCodeAgentTask
+metadata:
+  name: test-task
+  namespace: 08-sandboxtemplate
+spec:
+  templateName: claude-template
+  agentName: "Task Test Agent"
+  model: "${ANTHROPIC_MODEL}"
+  repo: "csantanapr/kcd-nyc-hello-template"
+  prompt: |
+    You are testing that the agent server dispatches work correctly.
+
+    Run these steps:
+    1. Run: echo "TASK_DISPATCH_OK"
+    2. Run: curl -s https://api.github.com/repos/csantanapr/kcd-nyc-hello-template | jq .full_name
+    3. Report PASS/FAIL for each step
+
+    End with "TASK TEST COMPLETE".

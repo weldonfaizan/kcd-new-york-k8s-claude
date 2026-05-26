@@ -1,0 +1,140 @@
+# ClaudeCodeAgentTask — one-shot work dispatch via Python SDK
+# Claims a warm pod from a ClaudeCodeSandboxPool using the k8s-agent-sandbox
+# Python SDK, sends work via the sandbox's agent server, streams the result.
+# SDK provides: Pod IP routing, automatic retries, connection recovery.
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: claudecodeagenttask
+  annotations:
+    kro.run/allow-breaking-changes: "true"
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: ClaudeCodeAgentTask
+
+    spec:
+      templateName: string | required=true description="Name of the SandboxTemplate to claim from"
+      agentName: string | default="Claude Agent" description="Display name for git commits"
+      agentEmail: string | default="claude-agent@bot.local" description="Git email"
+      model: string | default="" description="Override model (empty = use pool default)"
+      repo: string | default="" description="GitHub repository (owner/repo)"
+      task: string | default="" description="Task description"
+      prompt: string | required=true description="The prompt to send to Claude"
+
+    status:
+      jobName: ${dispatchJob.metadata.name}
+
+  resources:
+
+    # --- 1. ServiceAccount for SDK (needs sandboxclaim CRUD + sandbox read) ---
+    - id: taskSA
+      template:
+        apiVersion: v1
+        kind: ServiceAccount
+        metadata:
+          name: ${schema.metadata.name}-task
+          namespace: ${schema.metadata.namespace}
+
+    # --- 2. Role: SDK needs to create claims, read sandboxes, read pods ---
+    - id: taskRole
+      template:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: Role
+        metadata:
+          name: ${schema.metadata.name}-task
+          namespace: ${schema.metadata.namespace}
+        rules:
+          - apiGroups: ["extensions.agents.x-k8s.io"]
+            resources: ["sandboxclaims"]
+            verbs: ["create", "delete", "get", "list", "watch"]
+          - apiGroups: ["agents.x-k8s.io"]
+            resources: ["sandboxes"]
+            verbs: ["get", "list", "watch"]
+          - apiGroups: [""]
+            resources: ["pods"]
+            verbs: ["get", "list", "watch"]
+
+    # --- 3. RoleBinding ---
+    - id: taskRoleBinding
+      template:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: RoleBinding
+        metadata:
+          name: ${schema.metadata.name}-task
+          namespace: ${schema.metadata.namespace}
+        subjects:
+          - kind: ServiceAccount
+            name: ${taskSA.metadata.name}
+            namespace: ${schema.metadata.namespace}
+        roleRef:
+          apiGroup: rbac.authorization.k8s.io
+          kind: Role
+          name: ${taskRole.metadata.name}
+
+    # --- 4. ConfigMap: prompt content ---
+    - id: promptConfig
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: ${schema.metadata.name}-prompt
+          namespace: ${schema.metadata.namespace}
+        data:
+          prompt.txt: ${schema.spec.prompt}
+
+    # --- 5. Job: Python SDK dispatcher (depends on RoleBinding being ready) ---
+    - id: dispatchJob
+      template:
+        apiVersion: batch/v1
+        kind: Job
+        metadata:
+          name: ${schema.metadata.name}-dispatch
+          namespace: ${schema.metadata.namespace}
+          annotations:
+            kro.run/depends-on: ${taskRoleBinding.metadata.name}
+        spec:
+          backoffLimit: 3
+          activeDeadlineSeconds: 3900
+          template:
+            metadata:
+              labels:
+                app: sandbox-dispatcher
+            spec:
+              restartPolicy: Never
+              serviceAccountName: ${taskSA.metadata.name}
+              volumes:
+                - name: prompt
+                  configMap:
+                    name: ${promptConfig.metadata.name}
+              containers:
+                - name: dispatcher
+                  image: sandbox-dispatcher:latest
+                  imagePullPolicy: Never
+                  env:
+                    - name: TEMPLATE_NAME
+                      value: ${schema.spec.templateName}
+                    - name: NAMESPACE
+                      value: ${schema.metadata.namespace}
+                    - name: PROMPT
+                      value: ${schema.spec.prompt}
+                    - name: TARGET_REPO
+                      value: ${schema.spec.repo}
+                    - name: AGENT_TASK
+                      value: ${schema.spec.task}
+                    - name: AGENT_GIT_NAME
+                      value: ${schema.spec.agentName}
+                    - name: AGENT_GIT_EMAIL
+                      value: ${schema.spec.agentEmail}
+                    - name: ANTHROPIC_MODEL
+                      value: ${schema.spec.model}
+                  volumeMounts:
+                    - name: prompt
+                      mountPath: /prompts
+                  resources:
+                    requests:
+                      memory: "128Mi"
+                      cpu: "100m"
+                    limits:
+                      memory: "256Mi"
+                      cpu: "200m"

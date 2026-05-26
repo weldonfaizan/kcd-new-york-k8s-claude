@@ -10,7 +10,7 @@ Reference implementation for KCD New York 2026 talk: "Platform Engineering for A
 - Concepts are progressive — each builds on the previous
 - Each concept is self-contained with its own README and manifests
 - The numbered prefix is load-bearing — do not reorder
-- `proxy/` — standalone transparent credential proxy (Go binary, used by concepts 03-07)
+- `proxy/` — standalone transparent credential proxy (Go binary, used by concepts 03-08)
 - Proxy Docker build: `make build-proxy` (from project root, builds `proxy/`)
 
 ## Conventions
@@ -76,7 +76,7 @@ Output format: `>>> ` (text), `[Bash] {...}` (tool calls), `[done] ...` (result)
 
 - Concepts 02-03: prompt delivered via inline env var (`PROMPT`)
 - Concepts 04-05: prompt stored in `prompts/*.md`, delivered via ConfigMap volume mount
-- Concepts 06-07: prompt inline in CR spec, rendered into ConfigMap by KRO
+- Concepts 06-08: prompt inline in CR spec, rendered into ConfigMap by KRO
 
 ## README Template (per concept)
 
@@ -87,11 +87,12 @@ Each concept README follows: Concept Summary, Prerequisites, Step-by-Step, How t
 ### E2E Test Suite
 
 ```bash
-make test          # Run all tests (02, 03, 06, 07)
+make test          # Run all tests (02, 03, 06, 07, 08)
 make test-02       # Simple job
 make test-03       # Sidecar proxy
 make test-06       # KRO agent (requires KRO installed)
 make test-07       # Sandbox (requires KRO + agent-sandbox CRD)
+make test-08       # SandboxTemplate (requires KRO + agent-sandbox extensions)
 ```
 
 Tests 06 and 07 gracefully SKIP if their CRDs aren't installed. Each test creates a job, waits for completion, and prints output summary.
@@ -99,7 +100,8 @@ Tests 06 and 07 gracefully SKIP if their CRDs aren't installed. Each test create
 Prerequisites for full suite:
 - Cluster running: `make all` (builds images, creates cluster, loads images)
 - KRO installed: `helm install kro oci://registry.k8s.io/kro/charts/kro --namespace kro-system --create-namespace`
-- Agent-sandbox installed (for test-07): see `07-sandbox/README.md` step 3
+- Agent-sandbox installed (for test-07, test-08): see `07-sandbox/README.md` step 3
+- Agent-sandbox extensions (for test-08): included in v0.4.6 manifest
 
 ### Feature Cycle Testing (concepts 04-05)
 

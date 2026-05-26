@@ -29,7 +29,7 @@ PROXY_IMAGE    := credential-proxy:latest
 	logs-02 logs-03 logs-04 logs-05 \
 	proxy-logs-03 proxy-logs-04 proxy-logs-05 \
 	clean-02 clean-03 clean-04 clean-05 clean \
-	test test-02 test-03 test-06 test-07
+	test test-02 test-03 test-06 test-07 test-08
 
 # ---------------------------------------------------------------------------
 # Default target
@@ -170,7 +170,7 @@ clean: clean-02 clean-03 clean-04 clean-05 ## Delete all jobs across concepts
 # ---------------------------------------------------------------------------
 TIMEOUT ?= 120s
 
-test: test-02 test-03 test-06 test-07 ## Run e2e tests for all concepts
+test: test-02 test-03 test-06 test-07 test-08 ## Run e2e tests for all concepts
 
 test-02: ## Test concept 02: simple job
 	@echo "=== Test 02: Simple Job ==="
@@ -233,5 +233,38 @@ test-07: ## Test concept 07: sandbox (requires KRO + agent-sandbox CRD)
 		kubectl wait --for=condition=Finished sandbox/sandbox-test-sandbox -n 07-sandbox --timeout=300s && \
 		echo "PASS: 07 sandbox completed" && \
 		kubectl logs sandbox-test-sandbox -c claude-code -n 07-sandbox | tail -5 && \
+		echo ""; \
+	fi
+
+test-08: ## Test concept 08: sandbox template (requires KRO + agent-sandbox extensions)
+	@echo "=== Test 08: SandboxTemplate ===" && \
+	if ! kubectl get crd sandboxtemplates.extensions.agents.x-k8s.io >/dev/null 2>&1; then \
+		echo "SKIP: agent-sandbox extensions CRD not installed"; echo ""; \
+	else \
+		kubectl apply -f 08-sandboxtemplate/manifests/rgd-template.yaml && \
+		kubectl apply -f 08-sandboxtemplate/manifests/rgd-task.yaml && \
+		kubectl apply -f 08-sandboxtemplate/manifests/rgd-routine.yaml && \
+		echo "Waiting for CRDs to be established..." && \
+		for i in $$(seq 1 20); do kubectl get crd claudecodesandboxtemplates.kro.run claudecodeagenttasks.kro.run >/dev/null 2>&1 && break || sleep 2; done && \
+		(kubectl delete claudecodeagenttask test-task -n 08-sandboxtemplate --ignore-not-found 2>/dev/null || true) && \
+		(kubectl delete job test-task-dispatch -n 08-sandboxtemplate --ignore-not-found 2>/dev/null || true) && \
+		(kubectl delete claudecodesandboxtemplate claude-template -n 08-sandboxtemplate --ignore-not-found 2>/dev/null || true) && \
+		sleep 5 && \
+		(set -a && source .env && set +a && \
+			envsubst '$(ENVSUBST_VARS)' < 08-sandboxtemplate/manifests/test-template.yaml \
+			| kubectl apply -f -) && \
+		echo "Waiting for warm pool to be ready..." && \
+		for i in $$(seq 1 40); do \
+			READY=$$(kubectl get sandboxwarmpool claude-template-pool -n 08-sandboxtemplate -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0"); \
+			[ "$$READY" -ge "1" ] 2>/dev/null && echo "Pool ready: $$READY" && break || sleep 3; \
+		done && \
+		(set -a && source .env && set +a && \
+			envsubst '$(ENVSUBST_VARS)' < 08-sandboxtemplate/manifests/test-task.yaml \
+			| kubectl apply -f -) && \
+		echo "Waiting for dispatch job to complete..." && \
+		(for i in $$(seq 1 30); do kubectl get job test-task-dispatch -n 08-sandboxtemplate >/dev/null 2>&1 && break || sleep 2; done) && \
+		kubectl wait --for=condition=complete job/test-task-dispatch -n 08-sandboxtemplate --timeout=300s && \
+		echo "PASS: 08 sandbox template task completed" && \
+		kubectl logs job/test-task-dispatch -n 08-sandboxtemplate | grep -o '"result":"[^"]*"' | head -1 && \
 		echo ""; \
 	fi
