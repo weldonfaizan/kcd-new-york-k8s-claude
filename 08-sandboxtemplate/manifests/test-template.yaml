@@ -1,0 +1,27 @@
+# Test: create a SandboxTemplate with a warm pool of Claude Code sandboxes
+apiVersion: kro.run/v1alpha1
+kind: ClaudeCodeSandboxTemplate
+metadata:
+  name: claude-template
+  namespace: 08-sandboxtemplate
+spec:
+  replicas: 5
+  model: "${ANTHROPIC_MODEL}"
+  credentials:
+    secretName: agent-credentials
+  proxy:
+    domains:
+      - host: api.anthropic.com
+        inject_header: x-api-key
+        credential_env: ANTHROPIC_API_KEY
+      - host: api.github.com
+        action: credential-replace
+        inject_header: "Authorization"
+        inject_auth: "token"
+        credential_env: GH_TOKEN
+      - host: bedrock-runtime.us-west-2.amazonaws.com
+        action: passthrough
+      - host: bedrock-runtime.us-east-1.amazonaws.com
+        action: passthrough
+      - host: sts.us-west-2.amazonaws.com
+        action: passthrough

@@ -117,14 +117,14 @@ fi
 
 # Create namespaces for each concept
 echo "Setting up namespaces..."
-for ns in 02-claude-k8s-job 03-sidecar-proxy 04-code-reviewer 05-developer-agent 06-kro-agent 07-sandbox; do
+for ns in 02-claude-k8s-job 03-sidecar-proxy 04-code-reviewer 05-developer-agent 06-kro-agent 07-sandbox 08-sandboxtemplate; do
   kubectl create namespace "$ns" --context "$CTX" 2>/dev/null || true
 done
 
 # Create/recreate secrets in all namespaces
 echo "Setting up secrets..."
 
-for ns in 02-claude-k8s-job 03-sidecar-proxy 04-code-reviewer 05-developer-agent 06-kro-agent 07-sandbox; do
+for ns in 02-claude-k8s-job 03-sidecar-proxy 04-code-reviewer 05-developer-agent 06-kro-agent 07-sandbox 08-sandboxtemplate; do
   kubectl delete secret agent-credentials -n "$ns" --context "$CTX" 2>/dev/null || true
 
   if [ "$AUTH_MODE" = "bedrock" ]; then
@@ -148,7 +148,7 @@ if [ "$AUTH_MODE" = "bedrock" ]; then
   echo "  Set CLAUDE_CODE_USE_BEDROCK=1 and AWS_REGION=us-west-2 on pods"
   echo "  Metadata server dies when this terminal closes — re-run script to restart"
 fi
-echo "Namespaces: 02-claude-k8s-job, 03-sidecar-proxy, 04-code-reviewer, 05-developer-agent, 06-kro-agent, 07-sandbox"
+echo "Namespaces: 02-claude-k8s-job, 03-sidecar-proxy, 04-code-reviewer, 05-developer-agent, 06-kro-agent, 07-sandbox, 08-sandboxtemplate"
 echo "Secrets: created in all namespaces"
 echo ""
 echo "Verify with: kubectl get nodes --context $CTX"

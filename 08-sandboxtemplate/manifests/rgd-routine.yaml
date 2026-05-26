@@ -1,0 +1,129 @@
+# ClaudeCodeAgentRoutine — recurring work dispatch via Python SDK
+# CronJob that on each tick uses the k8s-agent-sandbox Python SDK to
+# claim a warm pod and dispatch work. SDK handles Pod IP routing,
+# retries, and connection recovery automatically.
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: claudecodeagentroutine
+  annotations:
+    kro.run/allow-breaking-changes: "true"
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: ClaudeCodeAgentRoutine
+
+    spec:
+      templateName: string | required=true description="Name of the SandboxTemplate to claim from"
+      schedule: string | required=true description="Cron schedule expression"
+      agentName: string | default="Claude Agent" description="Display name for git commits"
+      agentEmail: string | default="claude-agent@bot.local" description="Git email"
+      model: string | default="" description="Override model (empty = use pool default)"
+      repo: string | default="" description="GitHub repository (owner/repo)"
+      task: string | default="" description="Task description"
+      prompt: string | required=true description="The prompt to send to Claude"
+
+    status:
+      cronJobName: ${routineCronJob.metadata.name}
+
+  resources:
+
+    # --- 1. ServiceAccount for SDK ---
+    - id: routineSA
+      template:
+        apiVersion: v1
+        kind: ServiceAccount
+        metadata:
+          name: ${schema.metadata.name}-routine
+          namespace: ${schema.metadata.namespace}
+
+    # --- 2. Role: SDK needs claims CRUD + sandbox/pod read ---
+    - id: routineRole
+      template:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: Role
+        metadata:
+          name: ${schema.metadata.name}-routine
+          namespace: ${schema.metadata.namespace}
+        rules:
+          - apiGroups: ["extensions.agents.x-k8s.io"]
+            resources: ["sandboxclaims"]
+            verbs: ["create", "delete", "get", "list", "watch"]
+          - apiGroups: ["agents.x-k8s.io"]
+            resources: ["sandboxes"]
+            verbs: ["get", "list", "watch"]
+          - apiGroups: [""]
+            resources: ["pods"]
+            verbs: ["get", "list", "watch"]
+
+    # --- 3. RoleBinding ---
+    - id: routineRoleBinding
+      template:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: RoleBinding
+        metadata:
+          name: ${schema.metadata.name}-routine
+          namespace: ${schema.metadata.namespace}
+        subjects:
+          - kind: ServiceAccount
+            name: ${routineSA.metadata.name}
+            namespace: ${schema.metadata.namespace}
+        roleRef:
+          apiGroup: rbac.authorization.k8s.io
+          kind: Role
+          name: ${routineRole.metadata.name}
+
+    # --- 4. CronJob: Python SDK dispatcher on schedule ---
+    - id: routineCronJob
+      template:
+        apiVersion: batch/v1
+        kind: CronJob
+        metadata:
+          name: ${schema.metadata.name}
+          namespace: ${schema.metadata.namespace}
+        spec:
+          schedule: ${schema.spec.schedule}
+          concurrencyPolicy: Forbid
+          successfulJobsHistoryLimit: 3
+          failedJobsHistoryLimit: 3
+          jobTemplate:
+            spec:
+              backoffLimit: 0
+              activeDeadlineSeconds: 3900
+              template:
+                metadata:
+                  labels:
+                    app: sandbox-dispatcher
+                spec:
+                  restartPolicy: Never
+                  serviceAccountName: ${routineSA.metadata.name}
+                  containers:
+                    - name: dispatcher
+                      image: sandbox-dispatcher:latest
+                      imagePullPolicy: Never
+                      env:
+                        - name: TEMPLATE_NAME
+                          value: ${schema.spec.templateName}
+                        - name: NAMESPACE
+                          value: ${schema.metadata.namespace}
+                        - name: PROMPT
+                          value: ${schema.spec.prompt}
+                        - name: TARGET_REPO
+                          value: ${schema.spec.repo}
+                        - name: AGENT_TASK
+                          value: ${schema.spec.task}
+                        - name: AGENT_GIT_NAME
+                          value: ${schema.spec.agentName}
+                        - name: AGENT_GIT_EMAIL
+                          value: ${schema.spec.agentEmail}
+                        - name: ANTHROPIC_MODEL
+                          value: ${schema.spec.model}
+                        - name: SHUTDOWN_AFTER_SECONDS
+                          value: "300"
+                      resources:
+                        requests:
+                          memory: "128Mi"
+                          cpu: "100m"
+                        limits:
+                          memory: "256Mi"
+                          cpu: "200m"
