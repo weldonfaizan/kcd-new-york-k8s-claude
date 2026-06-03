@@ -4,7 +4,7 @@ Reference implementation for the [KCD New York](https://community.cncf.io/kcd-ne
 
 ## What This Is
 
-A progressive, hands-on guide showing how to run Claude Code as an AI agent on Kubernetes — from a simple Job to a fully autonomous developer agent with credential isolation and persistent memory.
+A progressive, hands-on guide showing how to run Claude Code as an AI agent on Kubernetes — from a simple Job to fleets of sandboxed, autonomous developer and reviewer agents with credential isolation, KRO abstractions, and warm-pool scaling.
 
 ```mermaid
 flowchart LR
@@ -17,8 +17,9 @@ flowchart LR
         c05["05 Developer Agent"]
         c06["06 KRO Abstraction"]
         c07["07 Sandbox Isolation"]
+        c08["08 SandboxTemplate Warm Pools"]
     end
-    c01 --> c02 --> c03 --> c04 --> c05 --> c06 --> c07
+    c01 --> c02 --> c03 --> c04 --> c05 --> c06 --> c07 --> c08
 
     subgraph infra["Shared Infrastructure"]
         proxy["proxy/"]
@@ -34,6 +35,7 @@ flowchart LR
     style c05 fill:#ebfbee,stroke:#2f9e44,color:#1e1e1e
     style c06 fill:#fff3bf,stroke:#e8590c,color:#1e1e1e
     style c07 fill:#fff3bf,stroke:#e8590c,color:#1e1e1e
+    style c08 fill:#fff3bf,stroke:#e8590c,color:#1e1e1e
     style proxy fill:#f8f0fc,stroke:#862e9c,color:#1e1e1e
     style cluster fill:#f8f9fa,stroke:#495057,color:#1e1e1e
 ```
@@ -60,7 +62,7 @@ cp .env.example .env
 
 ## Target Repo Setup
 
-Concepts 04-07 need a GitHub repo to operate on. Create one from the template:
+Concepts 04-08 need a GitHub repo to operate on. Create one from the template:
 
 1. Go to [`csantanapr/kcd-nyc-hello-template`](https://github.com/csantanapr/kcd-nyc-hello-template) and click **"Use this template"** → **"Create a new repository"**
 2. Name it whatever you like (e.g., `kcd-nyc-hello`) and make it **private** or **public**
@@ -96,6 +98,7 @@ envsubst '$TESTING_REPO' < manifests/configmap.yaml | kubectl apply -f -
 | 05 | [Developer Agent](./05-developer-agent/) | Autonomous developer with persistent memory and session resume |
 | 06 | [KRO Agent](./06-kro-agent/) | One CRD to rule them all — KRO abstracts the full agent pattern |
 | 07 | [Agent Sandbox](./07-sandbox/) | Process-level isolation via `kubernetes-sigs/agent-sandbox` — sandbox-only or CronJob + execution sandbox |
+| 08 | [SandboxTemplate](./08-sandboxtemplate/) | Warm pools + managed NetworkPolicy + Python SDK dispatch; developer (Task) and reviewer (Routine) coding agents |
 
 See [ROADMAP.md](./ROADMAP.md) for planned future extensions.
 
@@ -132,24 +135,33 @@ Run `make help` to see all available targets.
 Run the full test suite to verify all concepts work end-to-end:
 
 ```bash
-make test            # All tests (02, 03, 06, 07)
+make test            # All tests (02, 03, 06, 07, 08)
 make test-02         # Simple job
 make test-03         # Sidecar proxy
 make test-06         # KRO agent (skips if KRO not installed)
 make test-07         # Sandbox (skips if agent-sandbox CRD not installed)
+make test-08         # SandboxTemplate (skips if agent-sandbox extensions not installed)
 ```
 
-For the full suite, install KRO and agent-sandbox first:
+For the full suite, install KRO and agent-sandbox (core + extensions) first:
 
 ```bash
 helm install kro oci://registry.k8s.io/kro/charts/kro --namespace kro-system --create-namespace
 VERSION=$(curl -s https://api.github.com/repos/kubernetes-sigs/agent-sandbox/releases/latest | grep tag_name | cut -d'"' -f4)
 kubectl apply -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/manifest.yaml"
+kubectl apply -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/extensions.yaml"
+```
+
+Concept 08 also needs its dispatcher image built and loaded:
+
+```bash
+docker build -t sandbox-dispatcher:latest 08-sandboxtemplate/dispatcher/
+kind load docker-image sandbox-dispatcher:latest --name claude-demo
 ```
 
 ## Notes
 
 - Default auth is **Amazon Bedrock** via workload identity (EC2 metadata) — no API key needed
-- Model ID is set in `.env`: `us.anthropic.claude-haiku-4-5-20251001-v1:0` (Bedrock) or `claude-haiku-4-5-20251001` (API key)
+- Model ID is set via `ANTHROPIC_MODEL` in `.env` — defaults to Haiku 4.5 (`us.anthropic.claude-haiku-4-5-20251001-v1:0`); `.env` lists other Bedrock inference profiles (Sonnet/Opus) commented out for easy switching
 - The transparent proxy ([proxy/](./proxy/)) is introduced in concept 03 and used in all subsequent concepts
 - Target repo for PR operations is configured via `TESTING_REPO` in `.env` (see [Target Repo Setup](#target-repo-setup))

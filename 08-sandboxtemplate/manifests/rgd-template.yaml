@@ -96,7 +96,9 @@ spec:
                 return {"status": "ok"}
 
             @app.post("/execute", response_model=ExecuteResponse)
-            async def execute(request: ExecuteRequest):
+            def execute(request: ExecuteRequest):
+                # Sync def — FastAPI runs it in a threadpool so the long-running
+                # subprocess never blocks the event loop (keeps liveness probe alive).
                 try:
                     process = subprocess.run(
                         ["bash", "-c", request.command],
@@ -185,6 +187,14 @@ spec:
                     matchLabels:
                       app: sandbox-dispatcher
             egress:
+              # Bedrock workload-identity auth: allow the EC2 metadata endpoint
+              # so the AWS SDK can fetch temporary credentials. In api-key mode
+              # this rule is harmless (the endpoint simply isn't used).
+              - to:
+                - ipBlock:
+                    cidr: 169.254.169.254/32
+              # Public internet, but block the rest of the link-local/metadata
+              # range and private (RFC1918) networks to prevent lateral movement.
               - to:
                 - ipBlock:
                     cidr: 0.0.0.0/0
@@ -340,6 +350,8 @@ spec:
                       port: 8888
                     initialDelaySeconds: 5
                     periodSeconds: 30
+                    timeoutSeconds: 10
+                    failureThreshold: 6
                   volumeMounts:
                     - name: workspace
                       mountPath: /workspace
@@ -353,7 +365,7 @@ spec:
                       memory: "512Mi"
                       cpu: "200m"
                     limits:
-                      memory: "1Gi"
+                      memory: "2Gi"
                       cpu: "1000m"
 
     # --- 4. SandboxWarmPool: pre-warmed pods running the agent server ---

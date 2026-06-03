@@ -14,11 +14,14 @@ spec:
       - host: api.anthropic.com
         inject_header: x-api-key
         credential_env: ANTHROPIC_API_KEY
-      - host: api.github.com
-        action: credential-replace
-        inject_header: "Authorization"
-        inject_auth: "token"
+      - host: github.com
+        inject_auth: basic
         credential_env: GH_TOKEN
+      - host: api.github.com
+        inject_auth: basic
+        credential_env: GH_TOKEN
+      - host: registry.npmjs.org
+        action: passthrough
       - host: bedrock-runtime.us-west-2.amazonaws.com
         action: passthrough
       - host: bedrock-runtime.us-east-1.amazonaws.com

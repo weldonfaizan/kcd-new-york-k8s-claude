@@ -11,8 +11,8 @@ sandbox.commands.run(). SDK features leveraged:
 - Connection health verification
 """
 
-import json
 import os
+import shlex
 import sys
 import time
 
@@ -70,15 +70,27 @@ def main():
         prompt_parts.append(f"AGENT_TASK={agent_task}")
     prompt_parts.append("")
     prompt_parts.append(prompt)
-    full_prompt = json.dumps("\n".join(prompt_parts))
+    # Single-quote the prompt so bash treats it literally — the prompt contains
+    # backtick code fences, $VARS, and $(...) that bash would otherwise evaluate.
+    full_prompt = shlex.quote("\n".join(prompt_parts))
 
     # Build claude command (model must be provided via env or pool config)
     model = anthropic_model
     if not model:
         print("ERROR: ANTHROPIC_MODEL is required", file=sys.stderr)
         sys.exit(1)
+
+    # Export TARGET_REPO/AGENT_TASK on the claude process so prompts that
+    # reference $TARGET_REPO in shell snippets expand correctly in Claude's
+    # Bash tool subshells (they inherit the claude process environment).
+    env_prefix = ""
+    if target_repo:
+        env_prefix += f"TARGET_REPO={shlex.quote(target_repo)} "
+    if agent_task:
+        env_prefix += f"AGENT_TASK={shlex.quote(agent_task)} "
+
     claude_cmd = (
-        f'claude -p --dangerously-skip-permissions --verbose '
+        f'{env_prefix}claude -p --dangerously-skip-permissions --verbose '
         f'--output-format stream-json --model {model} '
         f'-- {full_prompt}'
     )

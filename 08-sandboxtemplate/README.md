@@ -7,6 +7,7 @@ Uses agent-sandbox **Extension CRDs** (`SandboxTemplate`, `SandboxClaim`, `Sandb
 - **Managed NetworkPolicy** — secure-by-default network isolation
 - **Python SDK dispatcher** — uses `SandboxClient.create_sandbox()` with Pod IP routing, retries, and connection recovery
 - **3-RGD separation** — Template (infra), Task (one-shot), Routine (recurring)
+- **Real coding agents** — a developer (Task) and reviewer (Routine) run the full PR feature cycle on the warm pool ([see below](#coding-agents-developer--reviewer))
 
 ## Architecture
 
@@ -85,7 +86,11 @@ Multiple tasks can run in parallel (one per warm pod). If tasks arrive faster th
 
 The `SandboxTemplate` uses `networkPolicyManagement: Managed` with custom rules:
 - **Ingress**: only pods with label `app: sandbox-dispatcher` can reach sandbox pods (dispatch Jobs)
-- **Egress**: allows public internet, blocks only the metadata server (`169.254.0.0/16`)
+- **Egress**: allows public internet and the EC2 metadata endpoint (`169.254.169.254/32`, needed for Bedrock workload-identity auth), but blocks the rest of the link-local range and RFC1918 private networks to prevent lateral movement.
+
+> **Note:** Kind's default CNI (kindnet) does **not** enforce NetworkPolicy, so these rules
+> are advisory in this demo — they take effect on a cluster with an enforcing CNI (Cilium,
+> Calico). The metadata-endpoint allow is what lets Bedrock auth work once enforcement is on.
 
 ### Update Strategy
 
@@ -179,7 +184,10 @@ SDK features used:
 - **`sandbox.commands.run()`** — sends `POST /execute` to the sandbox runtime, returns `ExecutionResult(stdout, stderr, exit_code)`
 - **`sandbox.terminate()`** — deletes claim + sandbox + pod (clean teardown)
 
-**Note:** Requires `kubernetes` Python client v31 (v36 has a bug where Bearer tokens aren't sent with API requests).
+**Notes:**
+- Requires `kubernetes` Python client v31 — v36 has a [regression](https://github.com/kubernetes-client/python/issues/2582) where the in-cluster Bearer token isn't sent, so all API calls fail as `system:anonymous`.
+- The sandbox runtime's `/execute` handler is a **synchronous** FastAPI route (`def`, not `async def`) so the long-running `claude` subprocess runs in a threadpool and never blocks the event loop — otherwise the liveness probe times out and the kubelet kills the pod mid-task.
+- The dispatcher passes the prompt through `shlex.quote` (single quotes) so bash inside `/execute` does not evaluate backtick fences, `$VARS`, or `$(...)` in the agent prompt before Claude sees it. `TARGET_REPO`/`AGENT_TASK` are exported onto the `claude` process so prompt shell snippets like `gh repo clone "$TARGET_REPO"` expand correctly.
 
 ## Prerequisites
 
@@ -189,15 +197,11 @@ SDK features used:
    docker build -t sandbox-dispatcher:latest 08-sandboxtemplate/dispatcher/
    kind load docker-image sandbox-dispatcher:latest --name claude-demo
    ```
-3. `bitnami/kubectl:latest` loaded (not needed for SDK approach, but used by older concepts):
-   ```bash
-   docker pull bitnami/kubectl:latest && kind load docker-image bitnami/kubectl:latest --name claude-demo
-   ```
-4. KRO installed:
+3. KRO installed:
    ```bash
    helm install kro oci://registry.k8s.io/kro/charts/kro --namespace kro-system --create-namespace
    ```
-5. Agent-sandbox v0.4.6 (core + extensions):
+4. Agent-sandbox v0.4.6 (core + extensions):
    ```bash
    kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.4.6/manifest.yaml
    kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.4.6/extensions.yaml
@@ -249,6 +253,45 @@ set -a && source .env && set +a
 envsubst '$ANTHROPIC_MODEL' < 08-sandboxtemplate/manifests/test-routine.yaml | kubectl apply -f -
 ```
 
+## Coding Agents: Developer + Reviewer
+
+Beyond the simple smoke-test task, this concept ships two real autonomous coding agents —
+the same developer/reviewer pair as concept 07, but running on the warm-pool + SDK
+architecture. Both reference the shared `claude-template` and need its proxy allowlist to
+include `github.com` (git clone/push) and `registry.npmjs.org` (`npm install`), which
+`test-template.yaml` already provides.
+
+| Agent | Kind | Trigger | What it does |
+|-------|------|---------|--------------|
+| **Developer** (`developer-task.yaml`) | `ClaudeCodeAgentTask` | one-shot, on demand | Triages work: open issues → PR review feedback → next `SPEC.md` feature. Opens/updates PRs. |
+| **Reviewer** (`reviewer-routine.yaml`) | `ClaudeCodeAgentRoutine` | cron (`*/10 * * * *`) | Reviews open PRs, requests changes if tests are missing, approves + merges when they pass. |
+
+The two coordinate through sentinel-tagged PR comments (`<!-- claude-developer -->` /
+`<!-- claude-reviewer -->`), driving the feature cycle: developer opens a PR without tests →
+reviewer requests tests → developer adds them → reviewer approves and merges.
+
+### Run the feature cycle
+
+```bash
+set -a && source .env && set +a
+
+# 1. Ensure the template/warm pool is up (proxy allowlist includes github.com + npm)
+envsubst '$ANTHROPIC_MODEL' < 08-sandboxtemplate/manifests/test-template.yaml | kubectl apply -f -
+
+# 2. Run the developer once — implements the next feature / addresses PR feedback
+envsubst '$ANTHROPIC_MODEL $TESTING_REPO' < 08-sandboxtemplate/manifests/developer-task.yaml | kubectl apply -f -
+kubectl logs -f job/claude-developer-dispatch -n 08-sandboxtemplate
+
+# 3. Start the reviewer on its schedule (or trigger a run immediately)
+envsubst '$ANTHROPIC_MODEL $TESTING_REPO' < 08-sandboxtemplate/manifests/reviewer-routine.yaml | kubectl apply -f -
+kubectl create job --from=cronjob/claude-reviewer claude-reviewer-now -n 08-sandboxtemplate
+kubectl logs -f job/claude-reviewer-now -n 08-sandboxtemplate
+```
+
+Re-run the developer after the reviewer requests changes; repeat until the reviewer merges.
+Each run claims a fresh warm pod and re-clones the repo (no persistence — the GitHub repo is
+the source of truth), so the agents stay stateless while the pool absorbs the cold-start cost.
+
 ## How to Verify
 
 ```bash
@@ -282,8 +325,13 @@ kubectl get sandboxclaims -n 08-sandboxtemplate
 ## Cleanup
 
 ```bash
-kubectl delete claudecodeagenttask test-task -n 08-sandboxtemplate --ignore-not-found
-kubectl delete claudecodeagentroutine test-routine -n 08-sandboxtemplate --ignore-not-found
+# Agent instances (smoke-test + coding agents)
+kubectl delete claudecodeagenttask test-task claude-developer -n 08-sandboxtemplate --ignore-not-found
+kubectl delete claudecodeagentroutine test-routine claude-reviewer -n 08-sandboxtemplate --ignore-not-found
+
+# Template (deletes the warm pool + all its pods)
 kubectl delete claudecodesandboxtemplate claude-template -n 08-sandboxtemplate --ignore-not-found
+
+# RGDs (removes the CRDs)
 kubectl delete rgd claudecodesandboxtemplate claudecodeagenttask claudecodeagentroutine --ignore-not-found
 ```
