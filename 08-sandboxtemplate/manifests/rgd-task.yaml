@@ -96,6 +96,10 @@ spec:
         spec:
           backoffLimit: 3
           activeDeadlineSeconds: 3900
+          # Auto-delete the Job (and its dispatcher pod) 5 min after it finishes.
+          # KRO deletes Jobs with orphan propagation, which would otherwise leave
+          # the completed dispatcher pod behind when the CR is deleted.
+          ttlSecondsAfterFinished: 300
           template:
             metadata:
               labels:
