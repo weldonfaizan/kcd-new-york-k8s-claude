@@ -6,7 +6,8 @@ metadata:
   namespace: 08-sandboxtemplate
 spec:
   templateName: claude-template
-  schedule: "*/30 * * * *"
+  schedule: "*/5 * * * *"
+  model: "${ANTHROPIC_MODEL}"
   agentName: "Routine Test Agent"
   repo: "csantanapr/kcd-nyc-hello-template"
   prompt: |
