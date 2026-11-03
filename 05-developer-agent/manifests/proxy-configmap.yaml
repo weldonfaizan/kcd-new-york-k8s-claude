@@ -26,3 +26,6 @@ data:
 
       - host: sts.us-west-2.amazonaws.com
         action: passthrough
+
+      - host: registry.npmjs.org
+        action: passthrough
