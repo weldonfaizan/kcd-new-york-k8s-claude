@@ -1,3 +1,44 @@
+ My setup notes
+
+> This is a fork of [csantanapr/kcd-new-york-k8s-claude](https://github.com/csantanapr/kcd-new-york-k8s-claude), the reference project from the KCD New York talk on running Claude Code agents on Kubernetes. The original code and design are the author's. This section records how I ran it on a Windows laptop and what I changed.
+
+## What I ran
+
+- Windows laptop, Docker Desktop (WSL2 backend), Ubuntu in WSL2
+- kind cluster `claude-demo`, kubectl, Helm
+- Anthropic API key (no Bedrock), model `claude-haiku-4-5-20251001`
+- Stages 02 to 05: a one-shot Job, the credential proxy sidecar, the code reviewer, and the developer agent. I ran the full loop of the developer opening a PR, the reviewer requesting tests, the developer adding them, and the reviewer approving and merging.
+- Total API cost for the whole run: about $0.35.
+
+## Windows and WSL2 notes
+
+- Run everything from an **Ubuntu** WSL distro, not the internal `docker-desktop` one. Docker refuses to run its CLI there.
+- In Docker Desktop, turn on WSL Integration for your Ubuntu distro.
+- Keep the repo in the Linux home folder (`~/`), not under `/mnt/c/`.
+- Docker Desktop's built-in Kubernetes can stay on or off. This project creates its own kind cluster, so it isn't needed.
+
+## Three fixes I needed
+
+1. **API-key mode.** The scripts default to Bedrock. Create the cluster with `AUTH_MODE=api-key make cluster`. Setting it only in `.env` was not enough for me.
+2. **Shell.** The Makefile uses `source`, which Ubuntu's default `sh` (dash) does not have. Run make with `SHELL=/bin/bash`, for example `make run-05 SHELL=/bin/bash`.
+3. **npm registry.** The proxy runs in strict mode, so stage 05's `npm install` is blocked by default. I added `registry.npmjs.org` as a passthrough entry in `05-developer-agent/manifests/proxy-configmap.yaml` (this fork's only code change).
+
+## Setup tips
+
+- Copy `.env.example` to `.env` and fill it in before `make cluster`, because the cluster step creates its secrets from `.env`. Keep `.env` out of git (it is already ignored).
+- Use a fine-grained GitHub token limited to the one test repo, with Contents and Pull requests read/write access.
+- Stage 04 and 05 act on a separate repo created from the author's `kcd-nyc-hello-template` template.
+
+## What I would change before using this for real
+
+- Give each agent its own identity (bot account or GitHub App) so the reviewer can submit real reviews.
+- Require a human approval before merge.
+- Use a private package mirror instead of allowing the public npm registry.
+- Treat issue text as untrusted input if the developer agent is changed to work from GitHub issues.
+
+---
+
+*Original README follows.*
 # Platform Engineering for AI Agents: Secure Claude Code Agents on Kubernetes with KRO
 
 Reference implementation for the [KCD New York](https://community.cncf.io/kcd-new-york/) talk — June 10, 2026.
